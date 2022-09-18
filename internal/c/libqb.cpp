@@ -22,7 +22,9 @@
     
 #endif
 
-int32 disableEvents=0;
+#include "mutex.h"
+#include "audio.h"
+#include "image.h"
 
 //Global console vvalues
 static int32 consolekey;
@@ -17747,53 +17749,10333 @@ void sub_put2(int32 i,int64 offset,void *element,int32 passed){
                 if(ShellExecuteEx(&shi)){
                     goto shell_complete;
                 }
-                
-                /*
-                    qbs_set(strz,qbs_add(qbs_new_txt("cmd.exe /c "),str));
-                    qbs_set(strz,qbs_add(strz,qbs_new_txt_len("\0",1)));
-                    ZeroMemory( &si, sizeof(si) ); si.cb = sizeof(si); ZeroMemory( &pi, sizeof(pi) );
-                    if(CreateProcess(
-                    NULL,           // No module name (use command line)
-                    (char*)&strz->chr[0], // Command line
-                    NULL,           // Process handle not inheritable
-                    NULL,           // Thread handle not inheritable
-                    FALSE,          // Set handle inheritance to FALSE
-                    DETACHED_PROCESS, // No creation flags
-                    NULL,           // Use parent's environment block
-                    NULL,           // Use parent's starting directory 
-                    &si,            // Pointer to STARTUPINFO structure
-                    &pi )           // Pointer to PROCESS_INFORMATION structure
-                    ){
-                    //ref: The created process remains in the system until all threads within the process have terminated and all handles to the process and any of its threads have been closed through calls to CloseHandle. The handles for both the process and the main thread must be closed through calls to CloseHandle. If these handles are not needed, it is best to close them immediately after the process is created. 
-                    CloseHandle( pi.hProcess );
-                    CloseHandle( pi.hThread );
-                    goto shell_complete;
+            }
+        }
+
+        // failed, try cmd /c method...
+        if (str2->len)
+            qbs_set(str2, qbs_add(qbs_new_txt(" "), str2));
+        qbs_set(strz, qbs_add(str1, str2));
+        qbs_set(strz, qbs_add(qbs_new_txt(" /c "), strz));
+        qbs_set(strz, qbs_add(strz, qbs_new_txt_len("\0", 1)));
+        ZeroMemory(&shi, sizeof(shi));
+        shi.cbSize = sizeof(shi);
+        shi.lpFile = &cmd[0];
+        shi.lpParameters = (char *)&strz->chr[0];
+        shi.fMask = SEE_MASK_FLAG_NO_UI;
+        shi.nShow = SW_HIDE;
+        if (ShellExecuteEx(&shi)) {
+            goto shell_complete;
+        }
+
+        /*
+            qbs_set(strz,qbs_add(qbs_new_txt("cmd.exe /c "),str));
+            qbs_set(strz,qbs_add(strz,qbs_new_txt_len("\0",1)));
+            ZeroMemory( &si, sizeof(si) ); si.cb = sizeof(si); ZeroMemory( &pi, sizeof(pi) );
+            if(CreateProcess(
+            NULL,           // No module name (use command line)
+            (char*)&strz->chr[0], // Command line
+            NULL,           // Process handle not inheritable
+            NULL,           // Thread handle not inheritable
+            FALSE,          // Set handle inheritance to FALSE
+            DETACHED_PROCESS, // No creation flags
+            NULL,           // Use parent's environment block
+            NULL,           // Use parent's starting directory
+            &si,            // Pointer to STARTUPINFO structure
+            &pi )           // Pointer to PROCESS_INFORMATION structure
+            ){
+            //ref: The created process remains in the system until all threads within the process have terminated and all handles to the process and any of its
+           threads have been closed through calls to CloseHandle. The handles for both the process and the main thread must be closed through calls to
+           CloseHandle. If these handles are not needed, it is best to close them immediately after the process is created. CloseHandle( pi.hProcess );
+            CloseHandle( pi.hThread );
+            goto shell_complete;
+            }
+        */
+
+        goto shell_complete; // failed
+
+    } else {
+
+        qbs_set(strz, qbs_add(qbs_new_txt("command.com /c "), str));
+        qbs_set(strz, qbs_add(strz, qbs_new_txt_len("\0", 1)));
+        ZeroMemory(&si, sizeof(si));
+        si.cb = sizeof(si);
+        ZeroMemory(&pi, sizeof(pi));
+        if (CreateProcess(NULL,                  // No module name (use command line)
+                          (char *)&strz->chr[0], // Command line
+                          NULL,                  // Process handle not inheritable
+                          NULL,                  // Thread handle not inheritable
+                          FALSE,                 // Set handle inheritance to FALSE
+                          CREATE_NEW_CONSOLE,    // note: cannot hide new console, but can preserve existing one
+                          NULL,                  // Use parent's environment block
+                          NULL,                  // Use parent's starting directory
+                          &si,                   // Pointer to STARTUPINFO structure
+                          &pi)                   // Pointer to PROCESS_INFORMATION structure
+        ) {
+            // ref: The created process remains in the system until all threads within the process have terminated and all handles to the process and any of its
+            // threads have been closed through calls to CloseHandle. The handles for both the process and the main thread must be closed through calls to
+            // CloseHandle. If these handles are not needed, it is best to close them immediately after the process is created.
+            CloseHandle(pi.hProcess);
+            CloseHandle(pi.hThread);
+            goto shell_complete;
+        }
+        goto shell_complete; // failed
+
+    } // cmd_ok()
+
+#else
+
+    qbs_set(strz, qbs_add(str, qbs_new_txt_len("\0", 1)));
+    pid_t pid = fork();
+    if (pid == 0)
+        _exit(system((char *)strz->chr));
+    return;
+
+#endif
+
+shell_complete:;
+
+} //_DONTWAIT & _HIDE
+
+void sub_kill(qbs *str) {
+    // note: file not found returned for non-existant paths too
+    //      file already open returned if access unavailable
+    if (new_error)
+        return;
+    static int32 i;
+    static qbs *strz = NULL;
+    if (!strz)
+        strz = qbs_new(0, 0);
+    qbs_set(strz, qbs_add(str, qbs_new_txt_len("\0", 1)));
+#ifdef QB64_WINDOWS
+    static WIN32_FIND_DATA fd;
+    static HANDLE hFind;
+    static qbs *strpath = NULL;
+    if (!strpath)
+        strpath = qbs_new(0, 0);
+    static qbs *strfullz = NULL;
+    if (!strfullz)
+        strfullz = qbs_new(0, 0);
+    // find path
+    qbs_set(strpath, strz);
+    for (i = strpath->len; i > 0; i--) {
+        if ((strpath->chr[i - 1] == 47) || (strpath->chr[i - 1] == 92)) {
+            strpath->len = i;
+            break;
+        }
+    } // i
+    if (i == 0)
+        strpath->len = 0; // no path specified
+    static int32 count;
+    count = 0;
+    hFind = FindFirstFile(fixdir(strz), &fd);
+    if (hFind == INVALID_HANDLE_VALUE) {
+        error(53);
+        return;
+    } // file not found
+    do {
+        if ((fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) == 0) {
+            qbs_set(strfullz, qbs_add(strpath, qbs_new_txt_len(fd.cFileName, strlen(fd.cFileName) + 1)));
+            if (!DeleteFile((char *)strfullz->chr)) {
+                i = GetLastError();
+                if ((i == 5) || (i == 19) || (i == 33) || (i == 32)) {
+                    FindClose(hFind);
+                    error(55);
+                    return;
+                } // file already open
+                FindClose(hFind);
+                error(53);
+                return; // file not found
+            }
+            count++;
+        } // not a directory
+    } while (FindNextFile(hFind, &fd));
+    FindClose(hFind);
+    if (!count) {
+        error(53);
+        return;
+    } // file not found
+    return;
+#else
+    if (remove(fixdir(strz))) {
+        i = errno;
+        if (i == ENOENT) {
+            error(53);
+            return;
+        } // file not found
+        if (i == EACCES) {
+            error(75);
+            return;
+        }          // path/file access error
+        error(64); // bad file name (assumed)
+    }
+#endif
+}
+
+void sub_name(qbs *oldname, qbs *newname) {
+    if (new_error)
+        return;
+    static qbs *strz = NULL;
+    if (!strz)
+        strz = qbs_new(0, 0);
+    static qbs *strz2 = NULL;
+    if (!strz2)
+        strz2 = qbs_new(0, 0);
+    static int32 i;
+    qbs_set(strz, qbs_add(oldname, qbs_new_txt_len("\0", 1)));
+    qbs_set(strz2, qbs_add(newname, qbs_new_txt_len("\0", 1)));
+    if (rename(fixdir(strz), fixdir(strz2))) {
+        i = errno;
+        if (i == ENOENT) {
+            error(53);
+            return;
+        } // file not found
+        if (i == EINVAL) {
+            error(64);
+            return;
+        } // bad file name
+        if (i == EACCES) {
+            error(75);
+            return;
+        }         // path/file access error
+        error(5); // Illegal function call (assumed)
+    }
+}
+
+void sub_chdir(qbs *str) {
+
+    if (new_error)
+        return;
+    static qbs *strz = NULL;
+    if (!strz)
+        strz = qbs_new(0, 0);
+    qbs_set(strz, qbs_add(str, qbs_new_txt_len("\0", 1)));
+    if (chdir(fixdir(strz)) == -1) {
+        // assume errno==ENOENT
+        error(76); // path not found
+    }
+
+    static int32 tmp_long;
+    static int32 got_ports = 0;
+}
+
+void sub_mkdir(qbs *str) {
+    if (new_error)
+        return;
+    static qbs *strz = NULL;
+    if (!strz)
+        strz = qbs_new(0, 0);
+    qbs_set(strz, qbs_add(str, qbs_new_txt_len("\0", 1)));
+#ifdef QB64_UNIX
+    if (mkdir(fixdir(strz), 0770) == -1) {
+#else
+    if (mkdir(fixdir(strz)) == -1) {
+#endif
+        if (errno == EEXIST) {
+            error(75);
+            return;
+        } // path/file access error
+        // assume errno==ENOENT
+        error(76); // path not found
+    }
+}
+
+void sub_rmdir(qbs *str) {
+    if (new_error)
+        return;
+    static qbs *strz = NULL;
+    if (!strz)
+        strz = qbs_new(0, 0);
+    qbs_set(strz, qbs_add(str, qbs_new_txt_len("\0", 1)));
+    if (rmdir(fixdir(strz)) == -1) {
+        if (errno == ENOTEMPTY) {
+            error(75);
+            return;
+        } // path/file access error
+        // assume errno==ENOENT
+        error(76); // path not found
+    }
+}
+
+long double pow2(long double x, long double y) {
+    if (x < 0) {
+        if (y != floor(y)) {
+            error(5);
+            return 0;
+        }
+    }
+    return pow(x, y);
+}
+
+int32 func_freefile() { return gfs_fileno_freefile(); }
+
+void sub__mousehide() {
+#ifdef QB64_GUI
+    if (!screen_hide) {
+        while (!window_exists) {
+            Sleep(100);
+        }
+#    ifdef QB64_GLUT
+        glutSetCursor(GLUT_CURSOR_NONE);
+#    endif
+    }
+#endif
+}
+
+#ifdef QB64_GLUT
+int mouse_cursor_style = GLUT_CURSOR_LEFT_ARROW;
+#else
+int mouse_cursor_style = 1;
+#endif
+
+void sub__mouseshow(qbs *style, int32 passed) {
+    if (new_error)
+        return;
+
+#ifdef QB64_GLUT
+
+    static qbs *str = NULL;
+    if (str == NULL)
+        str = qbs_new(0, 0);
+    if (passed) {
+        qbs_set(str, qbs_ucase(style));
+        if (qbs_equal(str, qbs_new_txt("DEFAULT"))) {
+            mouse_cursor_style = GLUT_CURSOR_LEFT_ARROW;
+            goto cursor_valid;
+        }
+        if (qbs_equal(str, qbs_new_txt("LINK"))) {
+            mouse_cursor_style = GLUT_CURSOR_INFO;
+            goto cursor_valid;
+        }
+        if (qbs_equal(str, qbs_new_txt("TEXT"))) {
+            mouse_cursor_style = GLUT_CURSOR_TEXT;
+            goto cursor_valid;
+        }
+        if (qbs_equal(str, qbs_new_txt("CROSSHAIR"))) {
+            mouse_cursor_style = GLUT_CURSOR_CROSSHAIR;
+            goto cursor_valid;
+        }
+        if (qbs_equal(str, qbs_new_txt("VERTICAL"))) {
+            mouse_cursor_style = GLUT_CURSOR_UP_DOWN;
+            goto cursor_valid;
+        }
+        if (qbs_equal(str, qbs_new_txt("HORIZONTAL"))) {
+            mouse_cursor_style = GLUT_CURSOR_LEFT_RIGHT;
+            goto cursor_valid;
+        }
+        if (qbs_equal(str, qbs_new_txt("TOPLEFT_BOTTOMRIGHT"))) {
+            mouse_cursor_style = GLUT_CURSOR_TOP_LEFT_CORNER;
+            goto cursor_valid;
+        }
+        if (qbs_equal(str, qbs_new_txt("TOPRIGHT_BOTTOMLEFT"))) {
+            mouse_cursor_style = GLUT_CURSOR_TOP_RIGHT_CORNER;
+            goto cursor_valid;
+        }
+        if (qbs_equal(str, qbs_new_txt("WAIT"))) {
+            mouse_cursor_style = GLUT_CURSOR_WAIT;
+            goto cursor_valid;
+        }
+        if (qbs_equal(str, qbs_new_txt("HELP"))) {
+            mouse_cursor_style = GLUT_CURSOR_HELP;
+            goto cursor_valid;
+        }
+        if (qbs_equal(str, qbs_new_txt("CYCLE")) || qbs_equal(str, qbs_new_txt("MOVE"))) {
+            mouse_cursor_style = GLUT_CURSOR_CYCLE;
+            goto cursor_valid;
+        }
+        error(5);
+        return;
+    }
+cursor_valid:
+
+    if (!screen_hide) {
+        while (!window_exists) {
+            Sleep(100);
+        }
+        glutSetCursor(mouse_cursor_style);
+    }
+
+#endif
+}
+
+float func__mousemovementx(int32 context, int32 passed) {
+    int32 handle;
+    handle = mouse_message_queue_default;
+    if (passed)
+        handle = context;
+    mouse_message_queue_struct *queue = (mouse_message_queue_struct *)list_get(mouse_message_queue_handles, handle);
+    if (queue == NULL) {
+        error(258);
+        return 0;
+    }
+    return queue->queue[queue->current].movementx;
+}
+float func__mousemovementy(int32 context, int32 passed) {
+    int32 handle;
+    handle = mouse_message_queue_default;
+    if (passed)
+        handle = context;
+    mouse_message_queue_struct *queue = (mouse_message_queue_struct *)list_get(mouse_message_queue_handles, handle);
+    if (queue == NULL) {
+        error(258);
+        return 0;
+    }
+    return queue->queue[queue->current].movementy;
+}
+
+void sub__mousemove(float x, float y) {
+#ifdef QB64_GLUT
+    int32 x2, y2, sx, sy;
+    if (display_page->text) {
+        sx = fontwidth[display_page->font] * display_page->width;
+        sy = fontheight[display_page->font] * display_page->height;
+        if (x < 0.5)
+            goto error;
+        if (y < 0.5)
+            goto error;
+        if (x > ((float)display_page->width) + 0.5)
+            goto error;
+        if (y > ((float)display_page->height) + 0.5)
+            goto error;
+        x -= 0.5;
+        y -= 0.5;
+        x = x * (float)fontwidth[display_page->font];
+        y = y * (float)fontheight[display_page->font];
+        x2 = qbr_float_to_long(x);
+        y2 = qbr_float_to_long(y);
+        if (x2 < 0)
+            x2 = 0;
+        if (y2 < 0)
+            y2 = 0;
+        if (x2 > sx - 1)
+            x2 = sx - 1;
+        if (y2 > sy - 1)
+            y2 = sy - 1;
+    } else {
+        sx = display_page->width;
+        sy = display_page->height;
+        x2 = qbr_float_to_long(x);
+        y2 = qbr_float_to_long(y);
+        if (x2 < 0)
+            goto error;
+        if (y2 < 0)
+            goto error;
+        if (x2 > sx - 1)
+            goto error;
+        if (y2 > sy - 1)
+            goto error;
+    }
+
+    // x2,y2 are pixel co-ordinates
+    // adjust for fullscreen position as necessary:
+    x2 *= environment_2d__screen_x_scale;
+    y2 *= environment_2d__screen_y_scale;
+    x2 += environment_2d__screen_x1;
+    y2 += environment_2d__screen_y1;
+
+    while (!window_exists) {
+        Sleep(100);
+    }
+    glutWarpPointer(x2, y2);
+    return;
+
+error:
+    error(5);
+#endif
+}
+
+float func__mousex(int32 context, int32 passed) {
+
+    static int32 x, x2;
+    static float f;
+
+    int32 handle;
+
+#ifdef QB64_WINDOWS
+    if (read_page->console) {
+        return consolemousex;
+    }
+#endif
+
+    handle = mouse_message_queue_default;
+    if (passed)
+        handle = context;
+    mouse_message_queue_struct *queue = (mouse_message_queue_struct *)list_get(mouse_message_queue_handles, handle);
+    if (queue == NULL) {
+        error(258);
+        return 0;
+    }
+    x = queue->queue[queue->current].x;
+
+    // calculate pixel offset of mouse within SCREEN using environment variables
+    x -= environment_2d__screen_x1;
+    x = qbr_float_to_long((((float)x + 0.5f) / environment_2d__screen_x_scale) - 0.5f);
+    if (x < 0)
+        x = 0;
+    if (x >= environment_2d__screen_width)
+        x = environment_2d__screen_width - 1;
+
+    // restrict range to the current display page's range to avoid causing errors
+    x2 = display_page->width;
+    if (display_page->text)
+        x2 *= fontwidth[display_page->font];
+    if (x >= x2)
+        x = x2 - 1;
+
+    if (display_page->text) {
+        f = x;
+        x2 = fontwidth[display_page->font];
+        f = f / (float)x2 + 0.5f;
+        x2 = qbr_float_to_long(f);
+        if (x2 > x)
+            f -= 0.001f;
+        if (x2 < x)
+            f += 0.001f;
+        return floor(f + 0.5);
+    }
+
+    return x;
+}
+
+float func__mousey(int32 context, int32 passed) {
+
+    static int32 y, y2;
+    static float f;
+
+    int32 handle;
+
+#ifdef QB64_WINDOWS
+    if (read_page->console) {
+        return consolemousey;
+    }
+#endif
+
+    handle = mouse_message_queue_default;
+    if (passed)
+        handle = context;
+    mouse_message_queue_struct *queue = (mouse_message_queue_struct *)list_get(mouse_message_queue_handles, handle);
+    if (queue == NULL) {
+        error(258);
+        return 0;
+    }
+    y = queue->queue[queue->current].y;
+
+    // calculate pixel offset of mouse within SCREEN using environment variables
+    y -= environment_2d__screen_y1;
+    y = qbr_float_to_long((((float)y + 0.5f) / environment_2d__screen_y_scale) - 0.5f);
+    if (y < 0)
+        y = 0;
+    if (y >= environment_2d__screen_height)
+        y = environment_2d__screen_height - 1;
+
+    // restrict range to the current display page's range to avoid causing errors
+    y2 = display_page->height;
+    if (display_page->text)
+        y2 *= fontheight[display_page->font];
+    if (y >= y2)
+        y = y2 - 1;
+
+    if (display_page->text) {
+        f = y;
+        y2 = fontheight[display_page->font];
+        f = f / (float)y2 + 0.5f;
+        y2 = qbr_float_to_long(f);
+        if (y2 > y)
+            f -= 0.001f;
+        if (y2 < y)
+            f += 0.001f;
+        return floor(f + 0.5);
+    }
+
+    return y;
+}
+
+int32 func__mousepipeopen() {
+    // creates a new mouse pipe, routing all mouse input into it before any preceeding pipes receive access to the data
+
+    // create new queue
+    int32 context = list_add(mouse_message_queue_handles);
+    mouse_message_queue_struct *queue = (mouse_message_queue_struct *)list_get(mouse_message_queue_handles, context);
+    queue->lastIndex = 65535;
+    queue->queue = (mouse_message *)calloc(1, sizeof(mouse_message) * (queue->lastIndex + 1));
+
+    // link new queue to child queue
+    int32 child_context = mouse_message_queue_first;
+    mouse_message_queue_struct *child_queue = (mouse_message_queue_struct *)list_get(mouse_message_queue_handles, child_context);
+    queue->child = child_context;
+    child_queue->parent = context;
+
+    // set new queue and primary queue
+    mouse_message_queue_first = context;
+
+    return context;
+}
+
+void sub__mouseinputpipe(int32 context) {
+    // pushes the current _MOUSEINPUT event to the lower pipe, effectively sharing the input with the lower pipe
+
+    mouse_message_queue_struct *queue = (mouse_message_queue_struct *)list_get(mouse_message_queue_handles, context);
+    if (queue == NULL) {
+        error(258);
+        return;
+    }
+
+    if (context == mouse_message_queue_default) {
+        error(5);
+        return;
+    } // cannot pipe input from the default queue
+
+    int32 child_context = queue->child;
+    mouse_message_queue_struct *child_queue = (mouse_message_queue_struct *)list_get(mouse_message_queue_handles, child_context);
+
+    // create new event in child queue
+    int32 i = child_queue->last + 1;
+    if (i > child_queue->lastIndex)
+        i = 0;
+    if (i == child_queue->current) {
+        int32 nextIndex = child_queue->last + 1;
+        if (nextIndex > child_queue->lastIndex)
+            nextIndex = 0;
+        child_queue->current = nextIndex;
+    }
+
+    int32 i2 = queue->current;
+
+    // copy event to child queue
+    child_queue->queue[i].x = queue->queue[i2].x;
+    child_queue->queue[i].y = queue->queue[i2].y;
+    child_queue->queue[i].movementx = queue->queue[i2].movementx;
+    child_queue->queue[i].movementy = queue->queue[i2].movementy;
+    child_queue->queue[i].buttons = queue->queue[i2].buttons;
+    child_queue->last = i;
+}
+
+void sub__mousepipeclose(int32 context) {
+    // closes an existing pipe and reverts the new route the pipe created
+
+    mouse_message_queue_struct *queue = (mouse_message_queue_struct *)list_get(mouse_message_queue_handles, context);
+    if (queue == NULL) {
+        error(258);
+        return;
+    }
+    if (context == mouse_message_queue_default) {
+        error(5);
+        return;
+    } // cannot delete default queue
+
+    // todo!
+}
+
+int32 func__mouseinput(int32 context, int32 passed) {
+    int32 handle;
+    handle = mouse_message_queue_default;
+    if (passed)
+        handle = context;
+    mouse_message_queue_struct *queue = (mouse_message_queue_struct *)list_get(mouse_message_queue_handles, handle);
+    if (queue == NULL) {
+        error(258);
+        return 0;
+    }
+    if (queue->current == queue->last)
+        return 0;
+    int32 newIndex = queue->current + 1;
+    if (newIndex > queue->lastIndex)
+        newIndex = 0;
+    queue->current = newIndex;
+    return -1;
+}
+
+int32 func__mousebutton(int32 i, int32 context, int32 passed) {
+    if (i < 1) {
+        error(5);
+        return 0;
+    }
+#ifdef QB64_WINDOWS
+    if (read_page->console) { // console may support up to 5 mouse buttons according to the documentation.
+        if (i == 1)
+            return consolebutton & 1;
+        if (i == 2)
+            return consolebutton & 2;
+        if (i == 3)
+            return consolebutton & 4;
+        if (i == 4)
+            return consolebutton & 8;
+        if (i == 5)
+            return consolebutton & 16;
+        return 0;
+    }
+#endif
+
+    if (i > 3)
+        return 0; // current SDL only supports 3 mouse buttons!
+    // swap indexes 2&3
+    if (i == 2) {
+        i = 3;
+    } else {
+        if (i == 3)
+            i = 2;
+    }
+    int32 handle;
+    handle = mouse_message_queue_default;
+    if (passed)
+        handle = context;
+    mouse_message_queue_struct *queue = (mouse_message_queue_struct *)list_get(mouse_message_queue_handles, handle);
+    if (queue == NULL) {
+        error(258);
+        return 0;
+    }
+    if (queue->queue[queue->current].buttons & (1 << (i - 1)))
+        return -1;
+    return 0;
+}
+
+int32 func__mousewheel(int32 context, int32 passed) {
+    static uint32 x;
+    int32 handle;
+
+#ifdef QB64_WINDOWS
+    if (read_page->console) {
+        if (consolebutton < -0x100)
+            return -1;
+        if (consolebutton > 0x100)
+            return 1;
+        return 0;
+    }
+#endif
+
+    handle = mouse_message_queue_default;
+    if (passed)
+        handle = context;
+    mouse_message_queue_struct *queue = (mouse_message_queue_struct *)list_get(mouse_message_queue_handles, handle);
+    if (queue == NULL) {
+        error(258);
+        return 0;
+    }
+    x = queue->queue[queue->current].buttons;
+    if ((x & (8 + 16)) == (8 + 16))
+        return 0; // cancelled out change
+    if (x & 8)
+        return -1; // up
+    if (x & 16)
+        return 1; // down
+    return 0;     // no change
+}
+
+extern uint16 call_absolute_offsets[256];
+void call_absolute(int32 args, uint16 offset) {
+    memset(&cpu, 0, sizeof(cpu_struct)); // flush cpu
+    cpu.cs = ((defseg - cmem) >> 4);
+    cpu.ip = offset;
+    cpu.ss = 0xFFFF;
+    cpu.sp = 0; // sp "loops" to <65536 after first push
+    cpu.ds = 80;
+    // push (near) arg offsets
+    static int32 i;
+    for (i = 0; i < args; i++) {
+        cpu.sp -= 2;
+        *(uint16 *)(cmem + cpu.ss * 16 + cpu.sp) = call_absolute_offsets[i];
+    }
+    // push ret segment, then push ret offset (both 0xFFFF to return control to QB64)
+    cpu.sp -= 4;
+    *(uint32 *)(cmem + cpu.ss * 16 + cpu.sp) = 0xFFFFFFFF;
+    cpu_call();
+}
+
+void call_int(int32 i) {
+
+    if (i == 0x33) {
+
+        if (cpu.ax == 0) {
+            cpu.ax = 0xFFFF; // mouse installed
+            cpu.bx = 2;
+            return;
+        }
+
+        if (cpu.ax == 1) {
+            sub__mouseshow(NULL, 0);
+            return;
+        }
+        if (cpu.ax == 2) {
+            sub__mousehide();
+            return;
+        }
+        if (cpu.ax == 3) {
+            // return the current mouse status
+            // buttons
+
+            int32 handle;
+            handle = mouse_message_queue_default;
+            mouse_message_queue_struct *queue = (mouse_message_queue_struct *)list_get(mouse_message_queue_handles, handle);
+
+            // buttons
+            cpu.bx = queue->queue[queue->last].buttons & 1;
+            if (queue->queue[queue->last].buttons & 4)
+                cpu.bx += 2;
+
+            // x,y offsets
+            static float mx, my;
+
+            // temp override current message index to the most recent event
+            static int32 current_mouse_message_backup;
+            current_mouse_message_backup = queue->current;
+            queue->current = queue->last;
+
+            mx = func__mousex(0, 0);
+            my = func__mousey(0, 0);
+
+            // restore "current" message index
+            queue->current = current_mouse_message_backup;
+
+            cpu.cx = mx;
+            cpu.dx = my;
+            // double x-axis value for modes 1,7,13
+            if ((display_page->compatible_mode == 1) || (display_page->compatible_mode == 7) || (display_page->compatible_mode == 13))
+                cpu.cx *= 2;
+            if (display_page->text) {
+                // note: a range from 0 to columns*8-1 is returned regardless of the number of actual pixels
+                cpu.cx = (mx - 0.5) * 8.0;
+                if (cpu.cx >= (display_page->width * 8))
+                    cpu.cx = (display_page->width * 8) - 1;
+                // note: a range from 0 to rows*8-1 is returned regardless of the number of actual pixels
+                // obselete line of code:
+                // cpu.dx=(((float)cpu.dx)/((float)(display_page->height*fontheight[display_page->font])))*((float)(display_page->height*8));//(mouse_y/height_in_pixels)*(rows*8)
+                cpu.dx = (my - 0.5) * 8.0;
+                if (cpu.dx >= (display_page->height * 8))
+                    cpu.dx = (display_page->height * 8) - 1;
+            }
+            return;
+        }
+
+        if (cpu.ax == 7) { // horizontal min/max
+            return;
+        }
+        if (cpu.ax == 8) { // vertical min/max
+            return;
+        }
+
+        // MessageBox2(NULL,"Unknown MOUSE Sub-function","Call Interrupt Error",MB_OK|MB_SYSTEMMODAL);
+        // exit(cpu.ax);
+
+        return;
+    }
+}
+
+// 2D PROTOTYPE QB64<->C CALLS
+
+// Creating/destroying an image surface:
+
+int32 func__newimage(int32 x, int32 y, int32 bpp, int32 passed) {
+    static int32 i;
+    if (new_error)
+        return 0;
+    if (x <= 0 || y <= 0) {
+        error(5);
+        return 0;
+    }
+    if (!passed) {
+        bpp = write_page->compatible_mode;
+    } else {
+        i = 0;
+        if (bpp >= 0 && bpp <= 2)
+            i = 1;
+        if (bpp >= 7 && bpp <= 13)
+            i = 1;
+        if (bpp == 256)
+            i = 1;
+        if (bpp == 32)
+            i = 1;
+        if (!i) {
+            error(5);
+            return 0;
+        }
+    }
+    i = imgnew(x, y, bpp);
+    if (!i)
+        return -1;
+    if (!passed) {
+        // adopt palette
+        if (write_page->pal) {
+            memcpy(img[i].pal, write_page->pal, 1024);
+        }
+        // adopt font
+        sub__font(write_page->font, -i, 1);
+        // adopt colors
+        img[i].color = write_page->color;
+        img[i].background_color = write_page->background_color;
+        // adopt transparent color
+        img[i].transparent_color = write_page->transparent_color;
+        // adopt blend state
+        img[i].alpha_disabled = write_page->alpha_disabled;
+        // adopt print mode
+        img[i].print_mode = write_page->print_mode;
+    }
+    return -i;
+}
+
+int32 func__copyimage(int32 i, int32 mode, int32 passed) {
+    static int32 i2, bytes;
+    static img_struct *s, *d;
+    if (new_error)
+        return 0;
+    // if (passed){
+    if (i >= 0) { // validate i
+        validatepage(i);
+        i = page[i];
+    } else {
+        i = -i;
+        if (i >= nextimg) {
+            error(258);
+            return 0;
+        }
+        if (!img[i].valid) {
+            error(258);
+            return 0;
+        }
+    }
+    // }else{
+    // i=write_page_index;
+    // }
+
+    s = &img[i];
+
+    if (passed & 1) {
+        if (mode != s->compatible_mode) {
+            if (mode != 33 || s->compatible_mode != 32) {
+                error(5);
+                return -1;
+            }
+            // create new buffered hardware image
+            i2 = new_hardware_img(s->width, s->height, (uint32 *)s->offset32, NEW_HARDWARE_IMG__BUFFER_CONTENT | NEW_HARDWARE_IMG__DUPLICATE_PROVIDED_BUFFER);
+            return i2 + HARDWARE_IMG_HANDLE_OFFSET;
+        }
+    }
+
+    // duplicate structure
+    i2 = newimg();
+    d = &img[i2];
+    memcpy(d, s, sizeof(img_struct));
+    // don't duplicate the memory lock (if any),
+    //_MEMIMAGE needs to obtain a new lock for the copy
+    img[i2].lock_id = NULL;
+    img[i2].lock_offset = NULL;
+    // duplicate pixel data
+    bytes = d->width * d->height * d->bytes_per_pixel;
+    d->offset = (uint8 *)malloc(bytes);
+    if (!d->offset) {
+        freeimg(i2);
+        return -1;
+    }
+    memcpy(d->offset, s->offset, bytes);
+    d->flags |= IMG_FREEMEM;
+    // duplicate palette
+    if (d->pal) {
+        d->pal = (uint32 *)malloc(1024);
+        if (!d->pal) {
+            free(d->offset);
+            freeimg(i2);
+            return -1;
+        }
+        memcpy(d->pal, s->pal, 1024);
+        d->flags |= IMG_FREEPAL;
+    }
+    // adjust flags
+    if (d->flags & IMG_SCREEN)
+        d->flags ^= IMG_SCREEN;
+    // return new handle
+    return -i2;
+}
+
+void sub__freeimage(int32 i, int32 passed) {
+    if (new_error)
+        return;
+    if (passed) {
+        if (i >= 0) { // validate i
+            error(5);
+            return; // The SCREEN's pages cannot be freed!
+        } else {
+
+            static hardware_img_struct *himg;
+            if (himg = get_hardware_img(i)) {
+                flush_old_hardware_commands();
+                // add command to free image
+                // create new command handle & structure
+                int32 hgch = list_add(hardware_graphics_command_handles);
+                hardware_graphics_command_struct *hgc = (hardware_graphics_command_struct *)list_get(hardware_graphics_command_handles, hgch);
+                hgc->remove = 0;
+                // set command values
+                hgc->command = HARDWARE_GRAPHICS_COMMAND__FREEIMAGE_REQUEST;
+                hgc->src_img = get_hardware_img_index(i);
+                himg->valid = 0;
+
+                // queue the command
+                hgc->next_command = 0;
+                hgc->order = display_frame_order_next;
+                if (last_hardware_command_added) {
+                    hardware_graphics_command_struct *hgc2 =
+                        (hardware_graphics_command_struct *)list_get(hardware_graphics_command_handles, last_hardware_command_added);
+                    hgc2->next_command = hgch;
+                }
+                last_hardware_command_added = hgch;
+                if (first_hardware_command == 0)
+                    first_hardware_command = hgch;
+
+                return;
+            }
+
+            i = -i;
+            if (i >= nextimg) {
+                error(258);
+                return;
+            }
+            if (!img[i].valid) {
+                error(258);
+                return;
+            }
+        }
+    } else {
+        i = write_page_index;
+    }
+    if (img[i].flags & IMG_SCREEN) {
+        error(5);
+        return;
+    } // The SCREEN's pages cannot be freed!
+    if (write_page_index == i)
+        sub__dest(-display_page_index);
+    if (read_page_index == i)
+        sub__source(-display_page_index);
+    if (img[i].flags & IMG_FREEMEM)
+        free(img[i].offset); // free pixel data (potential crash here)
+    if (img[i].flags & IMG_FREEPAL)
+        free(img[i].pal); // free palette
+    freeimg(i);
+}
+
+void freeallimages() {
+    static int32 i;
+    // note: handles 0 & -1(1) are reserved
+    for (i = 2; i < nextimg; i++) {
+        if (img[i].valid && i != abs(console_image)) {
+            if ((img[i].flags & IMG_SCREEN) == 0) { // The SCREEN's pages cannot be freed!
+                sub__freeimage(-i, 1);
+            }
+        } // valid
+    }     // i
+}
+
+// Selecting images:
+
+void sub__source(int32 i) {
+    if (new_error)
+        return;
+    if (i >= 0) { // validate i
+        validatepage(i);
+        i = page[i];
+    } else {
+        i = -i;
+        if (i >= nextimg) {
+            error(258);
+            return;
+        }
+        if (!img[i].valid) {
+            error(258);
+            return;
+        }
+    }
+    read_page_index = i;
+    read_page = &img[i];
+}
+
+void sub__dest(int32 i) {
+    if (new_error)
+        return;
+    if (i >= 0) { // validate i
+        validatepage(i);
+        i = page[i];
+    } else {
+        i = -i;
+        if (i >= nextimg) {
+            error(258);
+            return;
+        }
+        if (!img[i].valid) {
+            error(258);
+            return;
+        }
+    }
+    write_page_index = i;
+    write_page = &img[i];
+}
+
+int32 func__source() { return -read_page_index; }
+
+int32 func__dest() { return -write_page_index; }
+
+int32 func__display() { return -display_page_index; }
+
+// Changing the settings of an image surface:
+
+void sub__blend(int32 i, int32 passed) {
+    if (new_error)
+        return;
+    if (passed) {
+        if (i >= 0) { // validate i
+            validatepage(i);
+            i = page[i];
+        } else {
+            static hardware_img_struct *himg;
+            if (himg = get_hardware_img(i)) {
+                himg->alpha_disabled = 0;
+                return;
+            }
+            i = -i;
+            if (i >= nextimg) {
+                error(258);
+                return;
+            }
+            if (!img[i].valid) {
+                error(258);
+                return;
+            }
+        }
+    } else {
+        i = write_page_index;
+    }
+    if (img[i].bytes_per_pixel != 4) {
+        error(5);
+        return;
+    }
+    img[i].alpha_disabled = 0;
+}
+
+void sub__dontblend(int32 i, int32 passed) {
+    if (new_error)
+        return;
+    if (passed) {
+        if (i >= 0) { // validate i
+            validatepage(i);
+            i = page[i];
+        } else {
+            static hardware_img_struct *himg;
+            if (himg = get_hardware_img(i)) {
+                himg->alpha_disabled = 1;
+                return;
+            }
+            i = -i;
+            if (i >= nextimg) {
+                error(258);
+                return;
+            }
+            if (!img[i].valid) {
+                error(258);
+                return;
+            }
+        }
+    } else {
+        i = write_page_index;
+    }
+    if (img[i].bytes_per_pixel != 4)
+        return;
+    img[i].alpha_disabled = 1;
+}
+
+void sub__clearcolor(uint32 c, int32 i, int32 passed) {
+    //--         _NONE->1       2       4
+    // id.specialformat = "[{_NONE}][?][,?]"
+    if (new_error)
+        return;
+    static img_struct *im;
+    static int32 z;
+    static uint32 *lp, *last;
+    static uint8 b_max, b_min, g_max, g_min, r_max, r_min;
+    static uint8 *cp, *clast, v;
+    if (passed & 4) {
+        if (i >= 0) { // validate i
+            validatepage(i);
+            i = page[i];
+        } else {
+            i = -i;
+            if (i >= nextimg) {
+                error(258);
+                return;
+            }
+            if (!img[i].valid) {
+                error(258);
+                return;
+            }
+        }
+    } else {
+        i = write_page_index;
+    }
+    im = &img[i];
+    // text?
+    if (im->text) {
+        if ((passed & 1) && (!(passed & 2)))
+            return; // you can disable clearcolor using _CLEARCOLOR _NONE in text modes
+        error(5);
+        return;
+    }
+    // palette?
+    if (im->pal) {
+        if (passed & 1) {
+            if (passed & 2) {
+                error(5);
+                return;
+            } // invalid options
+            im->transparent_color = -1;
+            return;
+        }
+        if (!(passed & 2)) {
+            error(5);
+            return;
+        } // invalid options
+        if (c > 255) {
+            error(5);
+            return;
+        } // invalid color
+        im->transparent_color = c;
+        return;
+    }
+    // 32-bit? (alpha is ignored in this case)
+    if (passed & 1) {
+        if (passed & 2) {
+            error(5);
+            return;
+        }       // invalid options
+        return; // no action
+    }
+    if (!(passed & 2)) {
+        error(5);
+        return;
+    } // invalid options
+    c &= 0xFFFFFF;
+    last = im->offset32 + im->width * im->height;
+    for (lp = im->offset32; lp < last; lp++) {
+        if ((*lp & 0xFFFFFF) == c)
+            *lp = c;
+    }
+    return;
+}
+
+// Changing/Using an image surface:
+
+//_PUT "[(?,?)[-(?,?)]][,[?][,[?][,[(?,?)[-(?,?)]]]]]"
+//(defined elsewhere)
+
+//_IMGALPHA "?[,[?[{TO}?]][,?]]"
+void sub__setalpha(int32 a, uint32 c, uint32 c2, int32 i, int32 passed) {
+    //-->                             1        4        2
+    static img_struct *im;
+    static int32 z;
+    static uint32 *lp, *last;
+    static uint8 b_max, b_min, g_max, g_min, r_max, r_min, a_max, a_min;
+    static uint8 *cp, *clast, v;
+    if (new_error)
+        return;
+    if (passed & 2) {
+        if (i >= 0) { // validate i
+            validatepage(i);
+            i = page[i];
+        } else {
+            i = -i;
+            if (i >= nextimg) {
+                error(258);
+                return;
+            }
+            if (!img[i].valid) {
+                error(258);
+                return;
+            }
+        }
+    } else {
+        i = write_page_index;
+    }
+    im = &img[i];
+    if (im->pal) {
+        error(5);
+        return;
+    } // does not work on paletted images!
+    if (a < 0 || a > 255) {
+        error(5);
+        return;
+    } // invalid range
+    if (passed & 4) {
+        // ranged
+        if (c == c2)
+            goto uniquerange;
+        b_min = c & 0xFF;
+        g_min = c >> 8 & 0xFF;
+        r_min = c >> 16 & 0xFF;
+        a_min = c >> 24 & 0xFF;
+        b_max = c2 & 0xFF;
+        g_max = c2 >> 8 & 0xFF;
+        r_max = c2 >> 16 & 0xFF;
+        a_max = c2 >> 24 & 0xFF;
+        if (b_min > b_max)
+            swap(b_min, b_max);
+
+        if (g_min > g_max)
+            swap(g_min, g_max);
+        if (r_min > r_max)
+            swap(r_min, r_max);
+        if (a_min > a_max)
+            swap(a_min, a_max);
+        cp = im->offset;
+        z = im->width * im->height;
+    setalpha:
+        if (z--) {
+            v = *cp;
+            if (v <= b_max && v >= b_min) {
+                v = *(cp + 1);
+                if (v <= g_max && v >= g_min) {
+                    v = *(cp + 2);
+                    if (v <= r_max && v >= r_min) {
+                        v = *(cp + 3);
+                        if (v <= a_max && v >= a_min) {
+                            *(cp + 3) = a;
+                        }
                     }
-                */
-                
-                goto shell_complete;//failed
-                
-                }else{
-                
-                qbs_set(strz,qbs_add(qbs_new_txt("command.com /c "),str));
-                qbs_set(strz,qbs_add(strz,qbs_new_txt_len("\0",1)));
-                ZeroMemory( &si, sizeof(si) ); si.cb = sizeof(si); ZeroMemory( &pi, sizeof(pi) );
-                if(CreateProcess(
-                NULL,           // No module name (use command line)
-                (char*)&strz->chr[0], // Command line
-                NULL,           // Process handle not inheritable
-                NULL,           // Thread handle not inheritable
-                FALSE,          // Set handle inheritance to FALSE
-                CREATE_NEW_CONSOLE, //note: cannot hide new console, but can preserve existing one
-                NULL,           // Use parent's environment block
-                NULL,           // Use parent's starting directory 
-                &si,            // Pointer to STARTUPINFO structure
-                &pi )           // Pointer to PROCESS_INFORMATION structure
-                ){
-                    //ref: The created process remains in the system until all threads within the process have terminated and all handles to the process and any of its threads have been closed through calls to CloseHandle. The handles for both the process and the main thread must be closed through calls to CloseHandle. If these handles are not needed, it is best to close them immediately after the process is created. 
-                    CloseHandle( pi.hProcess );
-                    CloseHandle( pi.hThread );
-                    goto shell_complete;
+                }
+            }
+            cp += 4;
+            goto setalpha;
+        }
+        return;
+    }
+    if (passed & 1) {
+    uniquerange:
+        // alpha of c=a
+        c2 = a << 24;
+        lp = im->offset32 - 1;
+        last = im->offset32 + im->width * im->height - 1;
+        while (lp < last) {
+            if (*++lp == c) {
+                *lp = (*lp & 0xFFFFFF) | c2;
+            }
+        }
+        return;
+    }
+    // all alpha=a
+    cp = im->offset - 1;
+    clast = im->offset + im->width * im->height * 4 - 4;
+    while (cp < clast) {
+        *(cp += 4) = a;
+    }
+    return;
+}
+
+// Finding infomation about an image surface:
+
+int32 func__width(int32 i, int32 passed) {
+    if (new_error)
+        return 0;
+
+#ifdef QB64_WINDOWS
+    if ((read_page->console && !passed) || i == console_image) {
+        SECURITY_ATTRIBUTES SecAttribs = {sizeof(SECURITY_ATTRIBUTES), 0, 1};
+        HANDLE cl_conout = CreateFileA("CONOUT$", GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, &SecAttribs, OPEN_EXISTING, 0, 0);
+        CONSOLE_SCREEN_BUFFER_INFO cl_bufinfo;
+        GetConsoleScreenBufferInfo(cl_conout, &cl_bufinfo);
+        return cl_bufinfo.srWindow.Right - cl_bufinfo.srWindow.Left + 1;
+    }
+#endif
+
+    if (passed) {
+        if (i >= 0) { // validate i
+            validatepage(i);
+            i = page[i];
+        } else {
+            static hardware_img_struct *himg;
+            if (himg = get_hardware_img(i)) {
+                return himg->w;
+            }
+            i = -i;
+            if (i >= nextimg) {
+                error(258);
+                return 0;
+            }
+            if (!img[i].valid) {
+                error(258);
+                return 0;
+            }
+        }
+    } else {
+        i = write_page_index;
+    }
+    return img[i].width;
+}
+
+int32 func__height(int32 i, int32 passed) {
+    if (new_error)
+        return 0;
+
+#ifdef QB64_WINDOWS
+    if ((read_page->console && !passed) || i == console_image) {
+        SECURITY_ATTRIBUTES SecAttribs = {sizeof(SECURITY_ATTRIBUTES), 0, 1};
+        HANDLE cl_conout = CreateFileA("CONOUT$", GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, &SecAttribs, OPEN_EXISTING, 0, 0);
+        CONSOLE_SCREEN_BUFFER_INFO cl_bufinfo;
+        GetConsoleScreenBufferInfo(cl_conout, &cl_bufinfo);
+        return cl_bufinfo.srWindow.Bottom - cl_bufinfo.srWindow.Top + 1;
+        return cl_bufinfo.dwMaximumWindowSize.Y;
+    }
+#endif
+
+    if (passed) {
+        if (i >= 0) { // validate i
+            validatepage(i);
+            i = page[i];
+        } else {
+            static hardware_img_struct *himg;
+            if (himg = get_hardware_img(i)) {
+                return himg->h;
+            }
+            i = -i;
+            if (i >= nextimg) {
+                error(258);
+                return 0;
+            }
+            if (!img[i].valid) {
+                error(258);
+                return 0;
+            }
+        }
+    } else {
+        i = write_page_index;
+    }
+    return img[i].height;
+}
+
+int32 func__pixelsize(int32 i, int32 passed) {
+    if (new_error)
+        return 0;
+    if (passed) {
+        if (i >= 0) { // validate i
+            validatepage(i);
+            i = page[i];
+        } else {
+            i = -i;
+            if (i >= nextimg) {
+                error(258);
+                return 0;
+            }
+            if (!img[i].valid) {
+                error(258);
+                return 0;
+            }
+        }
+    } else {
+        i = write_page_index;
+    }
+    i = img[i].compatible_mode;
+    if (i == 32)
+        return 4;
+    if (!i)
+        return 0;
+    return 1;
+}
+
+int32 func__clearcolor(int32 i, int32 passed) {
+    if (new_error)
+        return 0;
+    if (passed) {
+        if (i >= 0) { // validate i
+            validatepage(i);
+            i = page[i];
+        } else {
+            i = -i;
+            if (i >= nextimg) {
+                error(258);
+                return 0;
+            }
+            if (!img[i].valid) {
+                error(258);
+                return 0;
+            }
+        }
+    } else {
+        i = write_page_index;
+    }
+    if (img[i].text)
+        return -1;
+    if (img[i].compatible_mode == 32)
+        return 0;
+    return img[i].transparent_color;
+}
+
+int32 func__blend(int32 i, int32 passed) {
+    if (new_error)
+        return 0;
+    if (passed) {
+        if (i >= 0) { // validate i
+            validatepage(i);
+            i = page[i];
+        } else {
+            i = -i;
+            if (i >= nextimg) {
+                error(258);
+                return 0;
+            }
+            if (!img[i].valid) {
+                error(258);
+                return 0;
+            }
+        }
+    } else {
+        i = write_page_index;
+    }
+    if (img[i].compatible_mode == 32) {
+        if (!img[i].alpha_disabled)
+            return -1;
+    }
+    return 0;
+}
+
+uint32 func__defaultcolor(int32 i, int32 passed) {
+    if (new_error)
+        return 0;
+    if (passed) {
+        if (i >= 0) { // validate i
+            validatepage(i);
+            i = page[i];
+        } else {
+            i = -i;
+            if (i >= nextimg) {
+                error(258);
+                return 0;
+            }
+            if (!img[i].valid) {
+                error(258);
+                return 0;
+            }
+        }
+    } else {
+        i = write_page_index;
+    }
+    return img[i].color;
+}
+
+uint32 func__backgroundcolor(int32 i, int32 passed) {
+    if (new_error)
+        return 0;
+    if (passed) {
+        if (i >= 0) { // validate i
+            validatepage(i);
+            i = page[i];
+        } else {
+            i = -i;
+            if (i >= nextimg) {
+                error(258);
+                return 0;
+            }
+            if (!img[i].valid) {
+                error(258);
+                return 0;
+            }
+        }
+    } else {
+        i = write_page_index;
+    }
+    return img[i].background_color;
+}
+
+// Working with 256 color palettes:
+
+uint32 func__palettecolor(int32 n, int32 i, int32 passed) {
+    if (new_error)
+        return 0;
+    if (passed) {
+        if (i >= 0) { // validate i
+            validatepage(i);
+            i = page[i];
+        } else {
+            i = -i;
+            if (i >= nextimg) {
+                error(258);
+                return 0;
+            }
+            if (!img[i].valid) {
+                error(258);
+                return 0;
+            }
+        }
+    } else {
+        i = write_page_index;
+    }
+    if (!img[i].pal) {
+        error(5);
+        return 0;
+    }
+    if (n < 0 || n > 255) {
+        error(5);
+        return 0;
+    } // out of range
+    return img[i].pal[n] | 0xFF000000;
+}
+
+void sub__palettecolor(int32 n, uint32 c, int32 i, int32 passed) {
+    if (new_error)
+        return;
+    if (passed) {
+        if (i >= 0) { // validate i
+            validatepage(i);
+            i = page[i];
+        } else {
+            i = -i;
+            if (i >= nextimg) {
+                error(258);
+                return;
+            }
+            if (!img[i].valid) {
+                error(258);
+                return;
+            }
+        }
+    } else {
+        i = write_page_index;
+    }
+    if (!img[i].pal) {
+        error(5);
+        return;
+    }
+    if (n < 0 || n > 255) {
+        error(5);
+        return;
+    } // out of range
+    img[i].pal[n] = c;
+}
+
+void sub__copypalette(int32 i, int32 i2, int32 passed) {
+    if (new_error)
+        return;
+    if (passed & 1) {
+        if (i >= 0) { // validate i
+            validatepage(i);
+            i = page[i];
+        } else {
+            i = -i;
+            if (i >= nextimg) {
+                error(258);
+                return;
+            }
+            if (!img[i].valid) {
+                error(258);
+                return;
+            }
+        }
+    } else {
+        i = read_page_index;
+    }
+    if (!img[i].pal) {
+        error(5);
+        return;
+    }
+    swap(i, i2);
+    if (passed & 2) {
+        if (i >= 0) { // validate i
+            validatepage(i);
+            i = page[i];
+        } else {
+            i = -i;
+            if (i >= nextimg) {
+                error(258);
+                return;
+            }
+            if (!img[i].valid) {
+                error(258);
+                return;
+            }
+        }
+    } else {
+        i = write_page_index;
+    }
+    if (!img[i].pal) {
+        error(5);
+        return;
+    }
+    swap(i, i2);
+    memcpy(img[i2].pal, img[i].pal, 1024);
+}
+
+void sub__printstring(float x, float y, qbs *text, int32 i, int32 passed) {
+    if (new_error)
+        return;
+
+    int32 old_dest = func__dest();
+
+    if (passed & 2) {
+        sub__dest(i);
+        if (i >= 0) { // validate i
+            validatepage(i);
+            i = page[i];
+        } else {
+            i = -i;
+            if (i >= nextimg) {
+                error(258);
+                goto printstring_exit;
+            }
+            if (!img[i].valid) {
+                error(258);
+                goto printstring_exit;
+            }
+        }
+    } else {
+        i = write_page_index;
+    }
+    static img_struct *im;
+    im = &img[i];
+    if (!text->len)
+        goto printstring_exit;
+    if (im->text) {
+        int oldx = func_pos(0), oldy = func_csrlin();
+        qbg_sub_locate(y, x, 0, 0, 0, 3);
+        qbs_print(text, 0);
+        qbg_sub_locate(oldy, oldx, 0, 0, 0, 3);
+        goto printstring_exit;
+    }
+    // graphics modes only
+    if (!text->len)
+        goto printstring_exit;
+    // Step?
+    if (passed & 1) {
+        im->x += x;
+        im->y += y;
+    } else {
+        im->x = x;
+        im->y = y;
+    }
+    // Adjust co-ordinates for viewport?
+    static int32 x2, y2;
+    if (im->clipping_or_scaling) {
+        if (im->clipping_or_scaling == 2) {
+            x2 = qbr_float_to_long(im->x * im->scaling_x + im->scaling_offset_x) + im->view_offset_x;
+            y2 = qbr_float_to_long(im->y * im->scaling_y + im->scaling_offset_y) + im->view_offset_y;
+        } else {
+            x2 = qbr_float_to_long(im->x) + im->view_offset_x;
+            y2 = qbr_float_to_long(im->y) + im->view_offset_y;
+        }
+    } else {
+        x2 = qbr_float_to_long(im->x);
+        y2 = qbr_float_to_long(im->y);
+    }
+
+    if (!text->len)
+        goto printstring_exit;
+
+    static uint32 w, h, z, z2, z3, a, a2, a3, color, background_color, f;
+    static uint32 *lp;
+    static uint8 *cp;
+
+    color = im->color;
+    background_color = im->background_color;
+
+    f = im->font;
+    h = fontheight[f];
+
+    if (f >= 32) { // custom font
+
+        // 8-bit / alpha-disabled 32-bit / dont-blend(alpha may still be applied)
+        if ((im->bytes_per_pixel == 1) || ((im->bytes_per_pixel == 4) && (im->alpha_disabled)) || (fontflags[f] & 8)) {
+
+            // render character
+            static int32 ok;
+            static uint8 *rt_data;
+            static int32 rt_w, rt_h, rt_pre_x, rt_post_x;
+            // int32 FontRenderTextASCII(int32 i,uint8*codepoint,int32 codepoints,int32 options,
+            //                          uint8**out_data,int32*out_x,int32 *out_y,int32*out_x_pre_increment,int32*out_x_post_increment){
+            ok = FontRenderTextASCII(font[f], (uint8 *)text->chr, text->len, 1, &rt_data, &rt_w, &rt_h, &rt_pre_x, &rt_post_x);
+            if (!ok)
+                goto printstring_exit;
+
+            w = rt_w;
+
+            switch (im->print_mode) {
+            case 3:
+                for (y2 = 0; y2 < h; y2++) {
+                    cp = rt_data + y2 * w;
+                    for (x2 = 0; x2 < w; x2++) {
+                        if (*cp++)
+                            pset_and_clip(x + x2, y + y2, color);
+                        else
+                            pset_and_clip(x + x2, y + y2, background_color);
+                    }
+                }
+                break;
+            case 1:
+                for (y2 = 0; y2 < h; y2++) {
+                    cp = rt_data + y2 * w;
+                    for (x2 = 0; x2 < w; x2++) {
+                        if (*cp++)
+                            pset_and_clip(x + x2, y + y2, color);
+                    }
+                }
+                break;
+            case 2:
+                for (y2 = 0; y2 < h; y2++) {
+                    cp = rt_data + y2 * w;
+                    for (x2 = 0; x2 < w; x2++) {
+                        if (!(*cp++))
+                            pset_and_clip(x + x2, y + y2, background_color);
+                    }
+                }
+                break;
+            default:
+                break;
+            }
+
+            free(rt_data);
+            goto printstring_exit;
+        } // 1-8 bit
+        // assume 32-bit blended
+
+        a = (color >> 24) + 1;
+        a2 = (background_color >> 24) + 1;
+        z = color & 0xFFFFFF;
+        z2 = background_color & 0xFFFFFF;
+
+        // render character
+        static int32 ok;
+        static uint8 *rt_data;
+        static int32 rt_w, rt_h, rt_pre_x, rt_post_x;
+        // int32 FontRenderTextASCII(int32 i,uint8*codepoint,int32 codepoints,int32 options,
+        //                          uint8**out_data,int32*out_x,int32 *out_y,int32*out_x_pre_increment,int32*out_x_post_increment){
+        ok = FontRenderTextASCII(font[f], (uint8 *)text->chr, text->len, 0, &rt_data, &rt_w, &rt_h, &rt_pre_x, &rt_post_x);
+
+        if (!ok)
+            goto printstring_exit;
+
+        w = rt_w;
+
+        switch (im->print_mode) {
+        case 3:
+
+            static float r1, g1, b1, alpha1, r2, g2, b2, alpha2;
+            alpha1 = (color >> 24) & 255;
+            r1 = (color >> 16) & 255;
+            g1 = (color >> 8) & 255;
+            b1 = color & 255;
+            alpha2 = (background_color >> 24) & 255;
+            r2 = (background_color >> 16) & 255;
+            g2 = (background_color >> 8) & 255;
+            b2 = background_color & 255;
+            static float dr, dg, db, da;
+
+            dr = r2 - r1;
+            dg = g2 - g1;
+            db = b2 - b1;
+            da = alpha2 - alpha1;
+            static float cw; // color weight multiplier, avoids seeing black when transitioning from RGBA(?,?,?,255) to RGBA(0,0,0,0)
+            if (alpha1)
+                cw = alpha2 / alpha1;
+            else
+                cw = 100000;
+            static float d;
+
+            for (y2 = 0; y2 < h; y2++) {
+                cp = rt_data + y2 * w;
+                for (x2 = 0; x2 < w; x2++) {
+
+                    d = *cp++;
+                    d = 255 - d;
+                    d /= 255.0;
+                    static float r3, g3, b3, alpha3;
+                    alpha3 = alpha1 + da * d;
+                    d *= cw;
+                    if (d > 1.0)
+                        d = 1.0;
+                    r3 = r1 + dr * d;
+                    g3 = g1 + dg * d;
+                    b3 = b1 + db * d;
+                    static int32 r4, g4, b4, alpha4;
+                    r4 = qbr_float_to_long(r3);
+                    g4 = qbr_float_to_long(g3);
+                    b4 = qbr_float_to_long(b3);
+                    alpha4 = qbr_float_to_long(alpha3);
+                    pset_and_clip(x + x2, y + y2, b4 + (g4 << 8) + (r4 << 16) + (alpha4 << 24));
+                }
+            }
+            break;
+        case 1:
+            for (y2 = 0; y2 < h; y2++) {
+                cp = rt_data + y2 * w;
+                for (x2 = 0; x2 < w; x2++) {
+                    z3 = *cp++;
+                    if (z3)
+                        pset_and_clip(x + x2, y + y2, ((z3 * a) >> 8 << 24) + z);
+                }
+            }
+            break;
+        case 2:
+            for (y2 = 0; y2 < h; y2++) {
+                cp = rt_data + y2 * w;
+                for (x2 = 0; x2 < w; x2++) {
+                    z3 = *cp++;
+                    if (z3 != 255)
+                        pset_and_clip(x + x2, y + y2, (((255 - z3) * a2) >> 8 << 24) + z2);
+                }
+            }
+            break;
+        default:
+            break;
+        }
+        free(rt_data);
+        goto printstring_exit;
+    } // custom font
+
+    // default fonts
+    static int32 character, character_c;
+    for (character_c = 0; character_c < text->len; character_c++) {
+        character = text->chr[character_c];
+        if (im->font == 8)
+            cp = &charset8x8[character][0][0];
+        if (im->font == 14)
+            cp = &charset8x16[character][1][0];
+        if (im->font == 16)
+            cp = &charset8x16[character][0][0];
+        switch (im->print_mode) {
+        case 3:
+            for (y2 = 0; y2 < h; y2++) {
+                for (x2 = 0; x2 < 8; x2++) {
+                    if (*cp++)
+                        pset_and_clip(x + x2, y + y2, color);
+                    else
+                        pset_and_clip(x + x2, y + y2, background_color);
+                }
+            }
+            break;
+        case 1:
+            for (y2 = 0; y2 < h; y2++) {
+                for (x2 = 0; x2 < 8; x2++) {
+                    if (*cp++)
+                        pset_and_clip(x + x2, y + y2, color);
+                }
+            }
+            break;
+        case 2:
+            for (y2 = 0; y2 < h; y2++) {
+                for (x2 = 0; x2 < 8; x2++) {
+                    if (!(*cp++))
+                        pset_and_clip(x + x2, y + y2, background_color);
+                }
+            }
+            break;
+        default:
+            break;
+        }
+        x += 8;
+    } // z
+
+printstring_exit:
+    if (passed & 2)
+        sub__dest(old_dest);
+    return;
+}
+
+int32 func__fontwidth(int32 f, int32 passed);
+int32 func__fontheight(int32 f, int32 passed);
+int32 func__font(int32 f, int32 passed);
+
+int32 func__printwidth(qbs *text, int32 screenhandle, int32 passed) {
+    /* Luke Ceddia <flukiluke@gmail.com>
+     * This routine should be rewritten properly by calling True Type.
+     * This is a temporary implementation
+     */
+    // Validate screenhandle (taken from func__font)
+    if (passed) {
+        if (screenhandle >= 0) {
+            validatepage(screenhandle);
+            screenhandle = page[screenhandle];
+        } else {
+            screenhandle = -screenhandle;
+            if (screenhandle >= nextimg) {
+                error(258);
+                return 0;
+            }
+            if (!img[screenhandle].valid) {
+                error(258);
+                return 0;
+            }
+        }
+    } else {
+        screenhandle = write_page_index;
+    }
+    if (img[screenhandle].text) { // Return LEN(text) in non-graphic modes
+        // error(5);
+        return text->len;
+    }
+    if (text->len == 0)
+        return 0;                                  // No point calculating an empty string
+    int32 fonthandle = img[screenhandle].font;     // Get the font used in screenhandle
+    int32 fwidth = func__fontwidth(fonthandle, 1); // Try and get the font width
+    if (fwidth != 0)
+        return fwidth * (text->len);                          // if it's not a variable width font, return the width * the letter count
+    int32 fheight = func__fontheight(fonthandle, 1);          // Height of the font used in screenhandle
+    int32 tempscreen = func__newimage(65535, fheight, 32, 1); // Just like calling _NEWIMAGE
+    int32 oldwritepage = func__dest();
+    sub__dest(tempscreen);
+    int32 oldreadpage = func__source();
+    sub__source(tempscreen);
+    sub__font(fonthandle, NULL, 0); // Set the font on our new screen
+    qbg_sub_color(0xffffffff, 0xffffffff, 0, NULL);
+    qbs_print(text, 0);
+    int xpos = 0;
+    for (int i = 65534; i >= 0; i--)
+        if (point(i, 0) != 0) {
+            xpos = i;
+            break;
+        }
+    sub__freeimage(tempscreen, 1);
+    sub__dest(oldwritepage);
+    sub__source(oldreadpage);
+    if (xpos == 0)
+        return 0;
+    return xpos + 1;
+}
+
+/*int32 func__printwidth(qbs* text,int32 i,int32 passed){
+    if (new_error) return 0;
+
+    static int32 f;
+    static img_struct *im;
+
+    if (passed){
+    if (i>=0){//validate i
+    validatepage(i); i=page[i];
+    }else{
+    i=-i; if (i>=nextimg){error(258); return 0;} if (!img[i].valid){error(258); return 0;}
+    }
+    }else{
+    i=write_page_index;
+    }
+    im=&img[i];
+    if (im->text){error(5); return 0;}//graphics modes only
+    if (!text->len) return 0;
+
+    if (f>=32){//custom font
+    //8-bit / alpha-disabled 32-bit / dont-blend(alpha may still be applied)
+    if ((im->bytes_per_pixel==1)||((im->bytes_per_pixel==4)&&(im->alpha_disabled))||(fontflags[f]&8)){
+    //render
+    static int32 ok;
+    static uint8 *rt_data;
+    static int32 rt_w,rt_h,rt_pre_x,rt_post_x;
+    //int32 FontRenderTextASCII(int32 i,uint8*codepoint,int32 codepoints,int32 options,
+    //                          uint8**out_data,int32*out_x,int32 *out_y,int32*out_x_pre_increment,int32*out_x_post_increment){
+    ok=FontRenderTextASCII(font[f],(uint8*)text->chr,text->len,1,
+    &rt_data,&rt_w,&rt_h,&rt_pre_x,&rt_post_x);
+    if (!ok) return 0;
+    free(rt_data);
+    return rt_w;
+    }//1-8 bit
+    //assume 32-bit blended
+    //render
+    static int32 ok;
+    static uint8 *rt_data;
+    static int32 rt_w,rt_h,rt_pre_x,rt_post_x;
+    //int32 FontRenderTextASCII(int32 i,uint8*codepoint,int32 codepoints,int32 options,
+    //                          uint8**out_data,int32*out_x,int32 *out_y,int32*out_x_pre_increment,int32*out_x_post_increment){
+    ok=FontRenderTextASCII(font[f],(uint8*)text->chr,text->len,0,
+    &rt_data,&rt_w,&rt_h,&rt_pre_x,&rt_post_x);
+    if (!ok) return 0;
+    free(rt_data);
+    return rt_w;
+    }//custom font
+
+    //default fonts
+    return text->len*8;
+
+}//printwidth*/
+
+int32 func__loadfont(qbs *f, int32 size, qbs *requirements, int32 passed) {
+    // f=_LOADFONT(ttf_filename$,height[,"bold,italic,underline,monospace,dontblend,unicode"])
+
+    if (new_error)
+        return NULL;
+
+    qbs *s1 = NULL;
+    s1 = qbs_new(0, 0);
+    qbs *req = NULL;
+    req = qbs_new(0, 0);
+    qbs *s3 = NULL;
+    s3 = qbs_new(0, 0);
+    uint8 r[32];
+    int32 i, i2, i3;
+    static int32 recall;
+
+    // validate size
+    if (size < 1) {
+        error(5);
+        return NULL;
+    }
+    if (size > 2048)
+        return -1;
+
+    // load the file
+    if (!f->len)
+        return -1; // return invalid handle if null length string
+    int32 fh, result;
+    int64 bytes;
+    fh = gfs_open(f, 1, 0, 0);
+
+#ifdef QB64_WINDOWS // rather than just immediately tossing an error, let's try looking in the default OS folder for the font first in case the user left off
+                    // the filepath.
+    if (fh < 0 && recall == 0) {
+        recall = -1; // to set a flag so we don't get trapped endlessly recalling the routine when the font actually doesn't exist
+        i = func__loadfont(qbs_add(qbs_new_txt("C:/Windows/Fonts/"), f), size, requirements, passed); // Look in the default windows font location
+        return i;
+    }
+#endif
+    recall = 0;
+    if (fh < 0)
+        return -1; // If we still can't load the font, then we just can't load the font...  Send an error code back.
+
+    // check requirements
+    memset(r, 0, 32);
+    if (passed) {
+        if (requirements->len) {
+            i = 1;
+            qbs_set(req, qbs_ucase(requirements)); // convert tmp str to perm str
+        nextrequirement:
+            i2 = func_instr(i, req, qbs_new_txt(","), 1);
+            if (i2) {
+                qbs_set(s1, func_mid(req, i, i2 - i, 1));
+            } else {
+                qbs_set(s1, func_mid(req, i, req->len - i + 1, 1));
+            }
+            qbs_set(s1, qbs_rtrim(qbs_ltrim(s1)));
+            if (qbs_equal(s1, qbs_new_txt("BOLD"))) {
+                r[0]++;
+                goto valid;
+            }
+            if (qbs_equal(s1, qbs_new_txt("ITALIC"))) {
+                r[1]++;
+                goto valid;
+            }
+            if (qbs_equal(s1, qbs_new_txt("UNDERLINE"))) {
+                r[2]++;
+                goto valid;
+            }
+            if (qbs_equal(s1, qbs_new_txt("DONTBLEND"))) {
+                r[3]++;
+                goto valid;
+            }
+            if (qbs_equal(s1, qbs_new_txt("MONOSPACE"))) {
+                r[4]++;
+                goto valid;
+            }
+            if (qbs_equal(s1, qbs_new_txt("UNICODE"))) {
+                r[5]++;
+                goto valid;
+            }
+            error(5);
+            return NULL; // invalid requirements
+        valid:
+            if (i2) {
+                i = i2 + 1;
+                goto nextrequirement;
+            }
+            for (i = 0; i < 32; i++)
+                if (r[i] > 1) {
+                    error(5);
+                    return NULL;
+                } // cannot define requirements twice
+        }         //->len
+    }             // passed
+    int32 options;
+    options = r[0] + (r[1] << 1) + (r[2] << 2) + (r[3] << 3) + (r[4] << 4) + (r[5] << 5);
+    // 1 bold TTF_STYLE_BOLD
+    // 2 italic TTF_STYLE_ITALIC
+    // 4 underline TTF_STYLE_UNDERLINE
+    // 8 dontblend (blending is the default in 32-bit alpha-enabled modes)
+    // 16 monospace
+    // 32 unicode
+
+    bytes = gfs_lof(fh);
+    static uint8 *content;
+    content = (uint8 *)malloc(bytes);
+    if (!content) {
+        gfs_close(fh);
+        return -1;
+    }
+    result = gfs_read(fh, -1, content, bytes);
+    gfs_close(fh);
+    if (result < 0) {
+        free(content);
+        return -1;
+    }
+
+    // open the font
+    // get free font handle
+    for (i = 32; i <= lastfont; i++) {
+        if (!font[i])
+            goto got_font_index;
+    }
+    // increase handle range
+    lastfont++;
+    font = (int32 *)realloc(font, 4 * (lastfont + 1));
+    font[lastfont] = NULL;
+    fontheight = (int32 *)realloc(fontheight, 4 * (lastfont + 1));
+    fontwidth = (int32 *)realloc(fontwidth, 4 * (lastfont + 1));
+    fontflags = (int32 *)realloc(fontflags, 4 * (lastfont + 1));
+    i = lastfont;
+got_font_index:
+    static int32 h;
+    h = FontLoad(content, bytes, size, -1, options);
+    free(content);
+    if (!h)
+        return -1;
+
+    font[i] = h;
+    fontheight[i] = size;
+    fontwidth[i] = FontWidth(h);
+    fontflags[i] = options;
+    return i;
+}
+
+int32 fontopen(qbs *f, int32 size, int32 options) { // Note: Just a stripped down verions of FUNC__LOADFONT
+
+    static int32 i;
+
+    // load the file
+    if (!f->len)
+        return -1; // return invalid handle if null length string
+    static int32 fh, result;
+    static int64 bytes;
+    fh = gfs_open(f, 1, 0, 0);
+    if (fh < 0)
+        return -1;
+    bytes = gfs_lof(fh);
+    static uint8 *content;
+    content = (uint8 *)malloc(bytes);
+    if (!content) {
+        gfs_close(fh);
+        return -1;
+    }
+    result = gfs_read(fh, -1, content, bytes);
+    gfs_close(fh);
+    if (result < 0) {
+        free(content);
+        return -1;
+    }
+
+    // open the font
+    // get free font handle
+    for (i = 32; i <= lastfont; i++) {
+        if (!font[i])
+            goto got_font_index;
+    }
+    // increase handle range
+    lastfont++;
+    font = (int32 *)realloc(font, 4 * (lastfont + 1));
+    font[lastfont] = NULL;
+    fontheight = (int32 *)realloc(fontheight, 4 * (lastfont + 1));
+    fontwidth = (int32 *)realloc(fontwidth, 4 * (lastfont + 1));
+    fontflags = (int32 *)realloc(fontflags, 4 * (lastfont + 1));
+    i = lastfont;
+got_font_index:
+    static int32 h;
+    h = FontLoad(content, bytes, size, -1, options);
+    free(content);
+    if (!h)
+        return -1;
+
+    font[i] = h;
+    fontheight[i] = size;
+    fontwidth[i] = FontWidth(h);
+    fontflags[i] = options;
+    return i;
+}
+
+void sub__font(int32 f, int32 i, int32 passed) {
+    //_FONT "?[,?]"
+    static int32 i2;
+    static img_struct *im;
+    if (new_error)
+        return;
+    if (passed & 1) {
+        if (i >= 0) { // validate i
+            validatepage(i);
+            i = page[i];
+        } else {
+            i = -i;
+            if (i >= nextimg) {
+                error(258);
+                return;
+            }
+            if (!img[i].valid) {
+                error(258);
+                return;
+            }
+        }
+    } else {
+        i = write_page_index;
+    }
+    im = &img[i];
+    // validate f
+    i2 = 0;
+    if (f == 8)
+        i2 = 1;
+    if (f == 9)
+        i2 = 1;
+    if (f == 14)
+        i2 = 1;
+    if (f == 15)
+        i2 = 1;
+    if (f == 16)
+        i2 = 1;
+    if (f == 17)
+        i2 = 1;
+    if (f >= 32 && f <= lastfont) {
+        if (font[f])
+            i2 = 1;
+    }
+    if (!i2) {
+        error(258);
+        return;
+    }
+
+    if (im->text && ((fontflags[f] & 16) == 0)) {
+        error(5);
+        return;
+    } // only monospace fonts can be used on text surfaces
+    // note: font changes to text screen mode images requires:
+    //      i) font change across all screen pages
+    //      ii) locking of the display
+    //      iii) update of the data being displayed
+    if (im->text) {
+        if (im->flags & IMG_SCREEN) {
+            // lock display
+            if (autodisplay) {
+                if (lock_display == 0)
+                    lock_display = 1; // request lock
+                while (lock_display != 2)
+                    Sleep(0);
+            }
+            // force update of data
+            screen_last_valid = 0; // ignore cache used to update the screen on next update
+            // apply change across all video pages
+            for (i = 0; i < pages; i++) {
+                if (page[i]) {
+                    im = &img[page[i]];
+                    im->font = f;
+                    // note: moving the cursor is unnecessary
+                }
+            }
+            // unlock
+            if (autodisplay) {
+                if (lock_display_required)
+                    lock_display = 0; // release lock
+            }
+            return;
+        }
+    } // text
+
+    im->font = f;
+    im->cursor_x = 1;
+    im->cursor_y = 1;
+    im->top_row = 1;
+    if (im->compatible_mode)
+        im->bottom_row = im->height / fontheight[f];
+    else
+        im->bottom_row = im->height;
+    im->bottom_row--;
+    if (im->bottom_row <= 0)
+        im->bottom_row = 1;
+    return;
+}
+
+int32 func__fontwidth(int32 f, int32 passed) {
+    static int32 i2;
+    if (new_error)
+        return 0;
+    if (passed) {
+        // validate f
+        i2 = 0;
+        if (f == 8)
+            i2 = 1;
+        if (f == 14)
+            i2 = 1;
+        if (f == 16)
+            i2 = 1;
+        if (f >= 32 && f <= lastfont) {
+            if (font[f])
+                i2 = 1;
+        }
+        if (!i2) {
+            error(258);
+            return 0;
+        }
+    } else {
+        f = write_page->font;
+    }
+    return fontwidth[f];
+}
+
+int32 func__fontheight(int32 f, int32 passed) {
+    static int32 i2;
+    if (new_error)
+        return 0;
+    if (passed) {
+        // validate f
+        i2 = 0;
+        if (f == 8)
+            i2 = 1;
+        if (f == 14)
+            i2 = 1;
+        if (f == 16)
+            i2 = 1;
+        if (f >= 32 && f <= lastfont) {
+            if (font[f])
+                i2 = 1;
+        }
+        if (!i2) {
+            error(258);
+            return 0;
+        }
+    } else {
+        f = write_page->font;
+    }
+    return fontheight[f];
+}
+
+int32 func__font(int32 i, int32 passed) {
+    if (new_error)
+        return 0;
+    if (passed) {
+        if (i >= 0) { // validate i
+            validatepage(i);
+            i = page[i];
+        } else {
+            i = -i;
+            if (i >= nextimg) {
+                error(258);
+                return 0;
+            }
+            if (!img[i].valid) {
+                error(258);
+                return 0;
+            }
+        }
+    } else {
+        i = write_page_index;
+    }
+    return img[i].font;
+}
+
+void sub__freefont(int32 f) {
+    if (new_error)
+        return;
+    static int32 i, i2;
+    // validate f (cannot remove QBASIC built in fonts!)
+    i2 = 0;
+    if (f >= 32 && f <= lastfont) {
+        if (font[f])
+            i2 = 1;
+    }
+    if (!i2) {
+        error(258);
+        return;
+    }
+    // check all surfaces, no surface can be using the font
+    for (i = 1; i < nextimg; i++) {
+        if (img[i].valid) {
+            if (img[i].font == f) {
+                error(5);
+                return;
+            }
+        }
+    }
+    // remove font
+    FontFree(font[f]);
+    font[f] = NULL;
+}
+
+void sub__printmode(int32 mode, int32 i, int32 passed) {
+    if (new_error)
+        return;
+    if (passed) {
+        if (i >= 0) { // validate i
+            validatepage(i);
+            i = page[i];
+        } else {
+            i = -i;
+            if (i >= nextimg) {
+                error(258);
+                return;
+            }
+            if (!img[i].valid) {
+                error(258);
+                return;
+            }
+        }
+    } else {
+        i = write_page_index;
+    }
+    if (img[i].text) {
+        if (mode != 1) {
+            error(5);
+            return;
+        }
+    }
+    if (mode == 1)
+        img[i].print_mode = 3; // fill
+    if (mode == 2)
+        img[i].print_mode = 1; // keep
+    if (mode == 3)
+        img[i].print_mode = 2; // only
+}
+
+int32 func__printmode(int32 i, int32 passed) {
+    if (new_error)
+        return 0;
+    if (passed) {
+        if (i >= 0) { // validate i
+            validatepage(i);
+            i = page[i];
+        } else {
+            i = -i;
+            if (i >= nextimg) {
+                error(258);
+                return 0;
+            }
+            if (!img[i].valid) {
+                error(258);
+                return 0;
+            }
+        }
+    } else {
+        i = write_page_index;
+    }
+    return img[i].print_mode;
+}
+
+uint32 matchcol(int32 r, int32 g, int32 b) {
+    static int32 v, v2, n, n2, best, c;
+    static int32 *p;
+    p = (int32 *)write_page->pal;
+    if (write_page->text)
+        n2 = 16;
+    else
+        n2 = write_page->mask + 1;
+    v = 1000;
+    best = 0;
+    for (n = 0; n < n2; n++) {
+        c = *p++;
+        v2 = abs(b - (c & 0xFF)) + abs(g - (c >> 8 & 0xFF)) + abs(r - (c >> 16 & 0xFF));
+        if (v2 < v) {
+            if (!v2)
+                return n; // perfect match
+            v = v2;
+            best = n;
+        }
+    } // n
+    return best;
+}
+
+uint32 matchcol(int32 r, int32 g, int32 b, int32 i) {
+    static int32 v, v2, n, n2, best, c;
+    static int32 *p;
+    p = (int32 *)img[i].pal;
+    if (img[i].text)
+        n2 = 16;
+    else
+        n2 = img[i].mask + 1;
+    v = 1000;
+    best = 0;
+    for (n = 0; n < n2; n++) {
+        c = *p++;
+        v2 = abs(b - (c & 0xFF)) + abs(g - (c >> 8 & 0xFF)) + abs(r - (c >> 16 & 0xFF));
+        if (v2 < v) {
+            if (!v2)
+                return n; // perfect match
+            v = v2;
+            best = n;
+        }
+    } // n
+    return best;
+}
+
+uint32 func__rgb(int32 r, int32 g, int32 b, int32 i, int32 passed) {
+    if (new_error)
+        return 0;
+    if (r < 0)
+        r = 0;
+    if (r > 255)
+        r = 255;
+    if (g < 0)
+        g = 0;
+    if (g > 255)
+        g = 255;
+    if (b < 0)
+        b = 0;
+    if (b > 255)
+        b = 255;
+    if (passed) {
+        if (i >= 0) { // validate i
+            validatepage(i);
+            i = page[i];
+        } else {
+            i = -i;
+            if (i >= nextimg) {
+                error(258);
+                return 0;
+            }
+            if (!img[i].valid) {
+                error(258);
+                return 0;
+            }
+        }
+        if (img[i].bytes_per_pixel == 4) {
+            return (r << 16) + (g << 8) + b | 0xFF000000;
+        } else { //==4
+            return matchcol(r, g, b, i);
+        } //==4
+    } else {
+        if (write_page->bytes_per_pixel == 4) {
+            return (r << 16) + (g << 8) + b | 0xFF000000;
+        } else { //==4
+            return matchcol(r, g, b);
+        } //==4
+    }     // passed
+} // rgb
+
+uint32 func__rgba(int32 r, int32 g, int32 b, int32 a, int32 i, int32 passed) {
+    if (new_error)
+        return 0;
+    if (r < 0)
+        r = 0;
+    if (r > 255)
+        r = 255;
+    if (g < 0)
+        g = 0;
+    if (g > 255)
+        g = 255;
+    if (b < 0)
+        b = 0;
+    if (b > 255)
+        b = 255;
+    if (a < 0)
+        a = 0;
+    if (a > 255)
+        a = 255;
+    if (passed) {
+        if (i >= 0) { // validate i
+            validatepage(i);
+            i = page[i];
+        } else {
+            i = -i;
+            if (i >= nextimg) {
+                error(258);
+                return 0;
+            }
+            if (!img[i].valid) {
+                error(258);
+                return 0;
+            }
+        }
+        if (img[i].bytes_per_pixel == 4) {
+            return (a << 24) + (r << 16) + (g << 8) + b;
+        } else { //==4
+            // error(5); return 0;
+            if ((!a) && (img[i].transparent_color != -1))
+                return img[i].transparent_color;
+            return matchcol(r, g, b, i);
+        } //==4
+    } else {
+        if (write_page->bytes_per_pixel == 4) {
+            return (a << 24) + (r << 16) + (g << 8) + b;
+        } else { //==4
+            // error(5); return 0;
+            if ((!a) && (write_page->transparent_color != -1))
+                return write_page->transparent_color;
+            return matchcol(r, g, b);
+        } //==4
+    }     // passed
+} // rgba
+
+int32 func__alpha(uint32 col, int32 i, int32 passed) {
+    if (new_error)
+        return 0;
+    if (passed) {
+        if (i >= 0) { // validate i
+            validatepage(i);
+            i = page[i];
+        } else {
+            i = -i;
+            if (i >= nextimg) {
+                error(258);
+                return 0;
+            }
+            if (!img[i].valid) {
+                error(258);
+                return 0;
+            }
+        }
+        if (img[i].bytes_per_pixel == 4) {
+            return col >> 24;
+        } else { //==4
+            // error(5); return 0;
+            if ((col < 0) || (col > (img[i].mask))) {
+                error(5);
+                return 0;
+            }
+            if (img[i].transparent_color == col)
+                return 0;
+            return 255;
+        } //==4
+    } else {
+        if (write_page->bytes_per_pixel == 4) {
+            return col >> 24;
+        } else { //==4
+            // error(5); return 0;
+            if ((col < 0) || (col > (write_page->mask))) {
+                error(5);
+                return 0;
+            }
+            if (write_page->transparent_color == col)
+                return 0;
+            return 255;
+        } //==4
+    }     // passed
+}
+
+int32 func__red(uint32 col, int32 i, int32 passed) {
+    if (new_error)
+        return 0;
+    if (passed) {
+        if (i >= 0) { // validate i
+            validatepage(i);
+            i = page[i];
+        } else {
+            i = -i;
+            if (i >= nextimg) {
+                error(258);
+                return 0;
+            }
+            if (!img[i].valid) {
+                error(258);
+                return 0;
+            }
+        }
+        if (img[i].bytes_per_pixel == 4) {
+            return col >> 16 & 0xFF;
+        } else { //==4
+            if ((col < 0) || (col > (img[i].mask))) {
+                error(5);
+                return 0;
+            }
+            return img[i].pal[col] >> 16 & 0xFF;
+        } //==4
+    } else {
+        if (write_page->bytes_per_pixel == 4) {
+            return col >> 16 & 0xFF;
+        } else { //==4
+            if ((col < 0) || (col > (write_page->mask))) {
+                error(5);
+                return 0;
+            }
+            return write_page->pal[col] >> 16 & 0xFF;
+        } //==4
+    }     // passed
+}
+
+int32 func__green(uint32 col, int32 i, int32 passed) {
+    if (new_error)
+        return 0;
+    if (passed) {
+        if (i >= 0) { // validate i
+            validatepage(i);
+            i = page[i];
+        } else {
+            i = -i;
+            if (i >= nextimg) {
+                error(258);
+                return 0;
+            }
+            if (!img[i].valid) {
+                error(258);
+                return 0;
+            }
+        }
+        if (img[i].bytes_per_pixel == 4) {
+            return col >> 8 & 0xFF;
+        } else { //==4
+            if ((col < 0) || (col > (img[i].mask))) {
+                error(5);
+                return 0;
+            }
+            return img[i].pal[col] >> 8 & 0xFF;
+        } //==4
+    } else {
+        if (write_page->bytes_per_pixel == 4) {
+            return col >> 8 & 0xFF;
+        } else { //==4
+            if ((col < 0) || (col > (write_page->mask))) {
+                error(5);
+                return 0;
+            }
+            return write_page->pal[col] >> 8 & 0xFF;
+        } //==4
+    }     // passed
+}
+
+int32 func__blue(uint32 col, int32 i, int32 passed) {
+    if (new_error)
+        return 0;
+    if (passed) {
+        if (i >= 0) { // validate i
+            validatepage(i);
+            i = page[i];
+        } else {
+            i = -i;
+            if (i >= nextimg) {
+                error(258);
+                return 0;
+            }
+            if (!img[i].valid) {
+                error(258);
+                return 0;
+            }
+        }
+        if (img[i].bytes_per_pixel == 4) {
+            return col & 0xFF;
+        } else { //==4
+            if ((col < 0) || (col > (img[i].mask))) {
+                error(5);
+                return 0;
+            }
+            return img[i].pal[col] & 0xFF;
+        } //==4
+    } else {
+        if (write_page->bytes_per_pixel == 4) {
+            return col & 0xFF;
+        } else { //==4
+            if ((col < 0) || (col > (write_page->mask))) {
+                error(5);
+                return 0;
+            }
+            return write_page->pal[col] & 0xFF;
+        } //==4
+    }     // passed
+}
+
+void sub_end() {
+
+    if (sub_gl_called)
+        error(271);
+
+    dont_call_sub_gl = 1;
+
+    sub_close(NULL, 0);
+    exit_blocked = 0; // allow exit via X-box or CTRL+BREAK
+
+#ifdef DEPENDENCY_CONSOLE_ONLY
+    screen_hide = 1;
+#endif
+
+    if (!screen_hide) {
+        // 1. set the display page as the destination page
+        sub__dest(func__display());
+        // 2. VIEW PRINT bottomline,bottomline
+        static int32 y;
+        if (write_page->text) {
+            y = write_page->height;
+        } else {
+            y = write_page->height / fontheight[write_page->font];
+        }
+        qbg_sub_view_print(y, y, 1 | 2);
+        // 3. PRINT 'clears the line without having to worry about its contents/size
+        qbs_print(nothingstring, 1);
+        // 4. PRINT "Press any key to continue"
+        qbs_print(qbs_new_txt("Press any key to continue"), 0);
+        // 5. Clear any buffered keypresses
+        static uint32 qbs_tmp_base;
+        qbs_tmp_base = qbs_tmp_list_nexti;
+        while (qbs_cleanup(qbs_tmp_base, qbs_notequal(qbs_inkey(), qbs_new_txt("")))) {
+            Sleep(0);
+        }
+        // 6. Enable autodisplay
+        autodisplay = 1;
+        // 7. Wait for a new keypress
+        do {
+            Sleep(100);
+            if (stop_program)
+                end();
+        } while (qbs_cleanup(qbs_tmp_base, qbs_equal(qbs_inkey(), qbs_new_txt(""))));
+
+    } else {
+        if (console) {
+// screen is hidden, console is visible
+#ifdef QB64_WINDOWS
+            cout << "\nPress any key to continue";
+            int32 junk;
+            FlushConsoleInputBuffer(GetStdHandle(STD_INPUT_HANDLE)); // clear any stray buffer events before we run END.
+            do {                                                     // ignore all console input
+                junk = func__getconsoleinput();
+            } while (junk != 1); // until we have a key down event
+#else
+            cout << "\nPress enter to continue";
+            static int32 ignore;
+            ignore = fgetc(stdin);
+#endif
+        }
+    }
+    close_program = 1;
+    end();
+    exit(0); //<-- should never happen
+}
+
+uint8 pu_dig[1024]; // digits (left justified)
+int32 pu_ndig;      // number of digits
+int32 pu_dp;        // decimal place modifier
+// note: if dp=0, the number is an integer and can be read as is
+//      if dp=1 the number is itself*10
+//      if dp=-1 the number is itself/10
+int32 pu_neg;
+uint8 pu_buf[1024];     // a buffer for preprocessing
+uint8 pu_exp_char = 69; //"E"
+
+int32 print_using(qbs *f, int32 s2, qbs *dest, qbs *pu_str) {
+    // type: 1=numeric, 2=string
+    if (new_error)
+        return 0;
+
+    static int32 x, z, z2, z3, z4, ii;
+    // x  - current format string read position
+    // z - used as a temp variable for various calculations and loops
+    // z2  - used for various calculations involving exponent digits
+    // z3 - used as a temp variable for various calculations and loops
+    // z4 - number of 0s between . and digits after point
+    // ii  - used as a counter for writing the output
+    static uint8 c;
+    static int32 stage, len, chrsleft, type, s;
+    static int32 leading_plus, dollar_sign, asterisk_spaces, digits_before_point, commas;
+    static int32 decimal_point, digits_after_point, trailing_plus, exponent_digits, trailing_minus;
+    static int32 cant_fit, extra_sign_space, rounded, digits_and_commas_before_point, leading_zero;
+    static qbs *qbs1 = NULL;
+
+    if (qbs1 == NULL)
+        qbs1 = qbs_new(1, 0);
+
+    if (pu_str)
+        type = 2;
+    else
+        type = 1;
+
+    s = s2;
+    len = f->len;
+
+scan:
+    rounded = 0;
+rounded_repass:
+
+    x = s - 1; // subtract one to counter pre-increment later
+
+    leading_plus = 0;
+    dollar_sign = 0;
+    asterisk_spaces = 0;
+    digits_before_point = 0;
+    commas = 0;
+    decimal_point = 0;
+    digits_after_point = 0;
+    trailing_plus = 0;
+    exponent_digits = 0;
+    trailing_minus = 0;
+    digits_and_commas_before_point = 0;
+    leading_zero = 0;
+    stage = 0;
+
+nextchar:
+    x++;
+    if (x < len) {
+        c = f->chr[x];
+        chrsleft = len - x;
+
+        if ((stage >= 2) && (stage <= 4)) {
+
+            if (c == 43) { //+
+                trailing_plus = 1;
+                x++;
+                goto numeric_spacer;
+            }
+
+            if (c == 45) { //-
+                trailing_minus = 1;
+                x++;
+                goto numeric_spacer;
+            }
+
+        } // stage>=2 & stage<=4
+
+        if ((stage >= 2) && (stage <= 3)) {
+
+            if (chrsleft >= 5) {
+                if ((c == 94) && (f->chr[x + 1] == 94) && (f->chr[x + 2] == 94) && (f->chr[x + 3] == 94) && (f->chr[x + 4] == 94)) { //^^^^^
+                    exponent_digits = 3;
+                    stage = 4;
+                    x += 4;
+                    goto nextchar;
+                }
+            } // 5
+
+            if (chrsleft >= 4) {
+                if ((c == 94) && (f->chr[x + 1] == 94) && (f->chr[x + 2] == 94) && (f->chr[x + 3] == 94)) { //^^^^
+                    exponent_digits = 2;
+                    stage = 4;
+                    x += 3;
+                    goto nextchar;
+                }
+            } // 4
+
+        } // stage>=2 & stage<=3
+
+        if (stage == 3) {
+
+            if (c == 35) { //#
+                digits_after_point++;
+                goto nextchar;
+            }
+
+        } // stage==3
+
+        if (stage == 2) {
+
+            if (c == 44) { //,
+                commas = 1;
+                digits_before_point++;
+                goto nextchar;
+            }
+
+        } // stage==2
+
+        if (stage <= 2) {
+
+            if (c == 35) { //#
+                digits_before_point++;
+                stage = 2;
+                goto nextchar;
+            }
+
+            if (c == 46) { //.
+                decimal_point = 1;
+                stage = 3;
+                goto nextchar;
+            }
+
+        } // stage<=2
+
+        if (stage <= 1) {
+
+            if (chrsleft >= 3) {
+                if ((c == 42) && (f->chr[x + 1] == 42) && (f->chr[x + 2] == 36)) { //**$
+                    asterisk_spaces = 1;
+                    digits_before_point = 2;
+                    dollar_sign = 1;
+                    stage = 2;
+                    x += 2;
+                    goto nextchar;
+                }
+            } // 3
+
+            if (chrsleft >= 2) {
+                if ((c == 42) && (f->chr[x + 1] == 42)) { //**
+                    asterisk_spaces = 1;
+                    digits_before_point = 2;
+                    stage = 2;
+                    x++;
+                    goto nextchar;
+                }
+                if ((c == 36) && (f->chr[x + 1] == 36)) { //$$
+                    dollar_sign = 1;
+                    digits_before_point = 1;
+                    stage = 2;
+                    x++;
+                    goto nextchar;
+                }
+            } // 2
+
+        } // stage 1
+
+        if (stage == 0) {
+
+            if (c == 43) { //+
+                leading_plus = 1;
+                stage = 1;
+                goto nextchar;
+            }
+
+        } // stage 0
+
+        // spacer/end encountered
+    } // x<len
+numeric_spacer:
+
+    // valid numeric format?
+    if (stage <= 1)
+        goto invalid_numeric_format;
+    if ((digits_before_point == 0) && (digits_after_point == 0))
+        goto invalid_numeric_format;
+
+    if (type == 0)
+        return s;    // s is the beginning of a new format but item has already been added to dest
+    if (type == 2) { // expected string format, not numeric format
+        error(13);   // type mismatch
+        return 0;
+    }
+
+    // reduce digits before point appropriatly
+    extra_sign_space = 0;
+    if (exponent_digits) {
+        if ((leading_plus == 0) && (trailing_plus == 0) && (trailing_minus == 0)) {
+            digits_before_point--;
+            if (digits_before_point == -1) {
+                digits_after_point--;
+                digits_before_point = 0;
+                if (digits_after_point == 0) {
+                    decimal_point = 0;
+                    digits_before_point++;
+                }
+            }
+            extra_sign_space = 1;
+        }
+    } else {
+        // the following doesn't occur if using an exponent
+        if (pu_neg) {
+            if ((leading_plus == 0) && (trailing_plus == 0) && (trailing_minus == 0)) {
+                digits_before_point--;
+                extra_sign_space = 1;
+            }
+        }
+        if (commas) {
+            digits_and_commas_before_point = digits_before_point;
+            ii = digits_before_point / 4; // for every 4 digits, one digit will be used up by a comma
+            digits_before_point -= ii;
+        }
+    }
+
+    //'0'->'.0' exception (for when format doesn't allow for any digits_before_point)
+    if (digits_before_point == 0) { // no digits allowed before decimal point
+        // note: pu_ndig=256, pu_dp=-255
+        if ((pu_ndig + pu_dp) == 1) { // 1 digit exists in front of the decimal point
+            if (pu_dig[0] == 48) {    // is it 0?
+                pu_dp--;              // moves decimal point left one position
+            }                         // 0
+        }
+    }
+
+    // will number fit? if it can't then adjustments will be made
+    cant_fit = 0;
+    if (exponent_digits) {
+        // give back extra_sign_space?
+        if (extra_sign_space) {
+            if (!pu_neg) {
+                if (digits_before_point <= 0) {
+                    extra_sign_space = 0;
+                    digits_before_point++; // will become 0 or 1
+                    // force 0 in recovered digit?
+                    if ((digits_before_point == 1) && (digits_after_point > 0)) {
+                        digits_before_point--;
+                        extra_sign_space = 2; // 2=put 0 instead of blank space
+                    }
+                }
+            }
+        }
+        if ((digits_before_point == 0) && (digits_after_point == 0)) {
+            cant_fit = 1;
+            digits_before_point = 1; // give back removed (for extra sign space) digit
+        }
+        // but does the exponent fit?
+        z2 = pu_ndig + pu_dp - 1; // calc exponent of most significant digit
+        // 1.0  = 0
+        // 10.0 = 1
+        // 0.1  = -1
+        // calc exponent of format's most significant position
+        if (digits_before_point)
+            z3 = digits_before_point - 1;
+        else
+            z3 = -1;
+        z = z2 - z3; // combine to calculate actual exponent which will be "printed"
+        z3 = abs(z);
+        z2 = sprintf((char *)pu_buf, "%u", z3); // use pu_buf to convert exponent to a string
+        if (z2 > exponent_digits) {
+            cant_fit = 1;
+            exponent_digits = z2;
+        }
+    } else {
+        z2 = 0;
+        z = pu_ndig + pu_dp; // calc number of digits required before decimal places
+        if (digits_before_point < z) {
+            digits_before_point = z;
+            cant_fit = 1;
+            if (commas)
+                digits_and_commas_before_point = digits_before_point + (digits_before_point - 1) / 3;
+        }
+    }
+
+    static int32 buf_size; // buf_size is an estimation of size required
+    static uint8 *cp, *buf = NULL;
+    static int32 count;
+    if (buf)
+        free(buf);
+    buf_size = 256; // 256 bytes to account for calc overflow (such as exponent digits)
+    buf_size += 9;  //%(1)+-(1)$(1)???.(1)???exponent(5)
+    buf_size += digits_before_point;
+    if (commas)
+        buf_size += ((digits_before_point / 3) + 2);
+    buf_size += digits_after_point;
+    buf = (uint8 *)malloc(buf_size);
+    cp = buf;
+    count = 0; // char count
+    ii = 0;
+
+    if (asterisk_spaces)
+        asterisk_spaces = 42;
+    else
+        asterisk_spaces = 32; // chraracter to fill blanks with
+
+    if (cant_fit) {
+        *cp++ = 37;
+        count++;
+    } //%
+
+    // leading +/-
+    if (leading_plus) {
+        if (pu_neg)
+            *cp++ = 45;
+        else
+            *cp++ = 43;
+        count++;
+    }
+
+    if (exponent_digits) {
+        z4 = 0;
+        // add $?
+        if (dollar_sign) {
+            *cp++ = 36;
+            count++;
+        } //$
+        // add - sign? (as sign space was not specified)
+        if (extra_sign_space) {
+            if (pu_neg) {
+                *cp++ = 45;
+            } else {
+                if (extra_sign_space == 2)
+                    *cp++ = 48;
+                else
+                    *cp++ = 32;
+            }
+            count++;
+        }
+        // add digits left of decimal point
+        for (z3 = 0; z3 < digits_before_point; z3++) {
+            if (ii < pu_ndig)
+                *cp++ = pu_dig[ii++];
+            else
+                *cp++ = 48;
+            count++;
+        }
+        // add decimal point
+        if (decimal_point) {
+            *cp++ = 46;
+            count++;
+        }
+        // add digits right of decimal point
+        for (z3 = 0; z3 < digits_after_point; z3++) {
+            if (ii < pu_ndig)
+                *cp++ = pu_dig[ii++];
+            else
+                *cp++ = 48;
+            count++;
+        }
+        // round last digit (requires a repass)
+        if (!rounded) {
+            if (ii < pu_ndig) {
+                if (pu_dig[ii] >= 53) { //>="5" (round 5 up)
+                    z = ii - 1;
+                    // round up pu (by adding 1 from digit at character position z)
+                    // note: pu_dig is rebuilt one character to the right so highest digit can flow over into next character
+                    rounded = 1;
+                    memmove(&pu_dig[1], &pu_dig[0], pu_ndig);
+                    pu_dig[0] = 48;
+                    z++;
+                puround2:
+                    pu_dig[z]++;
+                    if (pu_dig[z] > 57) {
+                        pu_dig[z] = 48;
+                        z--;
+                        goto puround2;
+                    }
+                    if (pu_dig[0] != 48) { // was extra character position necessary?
+                        pu_ndig++;         // note: pu_dp does not require any changes
+                    } else {
+                        memmove(&pu_dig[0], &pu_dig[1], pu_ndig);
+                    }
+                    goto rounded_repass;
+                }
+            }
+        }
+        // add exponent...
+        *cp++ = pu_exp_char;
+        count++; // add exponent D/E/F (set and restored by calling function as necessary)
+        if (z >= 0) {
+            *cp++ = 43;
+            count++;
+        } else {
+            *cp++ = 45;
+            count++;
+        } //+/- exponent's sign
+        // add exponent's leading 0s (if any)
+        for (z3 = 0; z3 < (exponent_digits - z2); z3++) {
+            *cp++ = 48;
+            count++;
+        }
+        // add exponent's value
+        for (z3 = 0; z3 < z2; z3++) {
+            *cp++ = pu_buf[z3];
+            count++;
+        }
+    } else {
+        //"print" everything before the point
+        // calculate digit spaces before the point in number
+        if (!commas)
+            digits_and_commas_before_point = digits_before_point;
+        z = pu_ndig + pu_dp; // num of character whole portion of number requires
+        z4 = 0;
+        if (z < 0)
+            z4 = -z; // number of 0s between . and digits after point
+        if (commas)
+            z = z + (z - 1) / 3; // including appropriate amount of commas
+        if (z < 0)
+            z = 0;
+        z2 = digits_and_commas_before_point - z;
+        if ((z == 0) && (z2 > 0)) {
+            leading_zero = 1;
+            z2--;
+        } // change .1 to 0.1 if possible
+        for (z3 = 0; z3 < z2; z3++) {
+            *cp++ = asterisk_spaces;
+            count++;
+        }
+        // add - sign? (as sign space was not specified)
+        if (extra_sign_space) {
+            *cp++ = 45;
+            count++;
+        }
+        // add $?
+        if (dollar_sign) {
+            *cp++ = 36;
+            count++;
+        } //$
+        // leading 0?
+        if (leading_zero) {
+            *cp++ = 48;
+            count++;
+        } // 0
+        // add digits left of decimal point
+        for (z3 = 0; z3 < z; z3++) {
+            if ((commas != 0) && (((z - z3) & 3) == 0)) {
+                *cp++ = 44;
+            } else {
+                if (ii < pu_ndig)
+                    *cp++ = pu_dig[ii++];
+                else
+                    *cp++ = 48;
+            }
+            count++;
+        }
+        // add decimal point
+        if (decimal_point) {
+            *cp++ = 46;
+            count++;
+        }
+        // add digits right of decimal point
+        for (z3 = 0; z3 < digits_after_point; z3++) {
+            if (z4) {
+                z4--;
+                *cp++ = 48;
+            } else {
+                if (ii < pu_ndig)
+                    *cp++ = pu_dig[ii++];
+                else
+                    *cp++ = 48;
+            }
+            count++;
+        }
+        // round last digit (requires a repass)
+        if (!rounded) {
+            if (ii < pu_ndig) {
+                if (pu_dig[ii] >= 53) { //>="5" (round 5 up)
+                    z = ii - 1;
+                    // round up pu (by adding 1 from digit at character position z)
+                    // note: pu_dig is rebuilt one character to the right so highest digit can flow over into next character
+                    rounded = 1;
+                    memmove(&pu_dig[1], &pu_dig[0], pu_ndig);
+                    pu_dig[0] = 48;
+                    z++;
+                puround1:
+                    pu_dig[z]++;
+                    if (pu_dig[z] > 57) {
+                        pu_dig[z] = 48;
+                        z--;
+                        goto puround1;
+                    }
+                    if (pu_dig[0] != 48) { // was extra character position necessary?
+                        pu_ndig++;         // note: pu_dp does not require any changes
+                    } else {
+                        memmove(&pu_dig[0], &pu_dig[1], pu_ndig);
+                    }
+                    goto rounded_repass;
+                }
+            }
+        }
+    } // exponent_digits
+
+    // add trailing sign?
+    // trailing +/-
+    if (trailing_plus) {
+        if (pu_neg)
+            *cp++ = 45;
+        else
+            *cp++ = 43;
+        count++;
+    }
+    // trailing -
+    if (trailing_minus) {
+        if (pu_neg)
+            *cp++ = 45;
+        else
+            *cp++ = 32;
+        count++;
+    }
+
+    qbs_set(dest, qbs_add(dest, qbs_new_txt_len((char *)buf, count)));
+
+    s = x;
+    type = 0; // passed type added
+    if (s >= len)
+        return 0; // end of format line encountered and passed item added
+    goto scan;
+
+invalid_numeric_format:
+    // string format
+    static int32 string_size;
+
+    x = s;
+    if (x < len) {
+        c = f->chr[x];
+        string_size = 0; // invalid
+        if (c == 38)
+            string_size = -1; //"&" (all of string)
+        if (c == 33)
+            string_size = 1; //"!" (first character only)
+        if (c == 92) {       //"\" first n characters
+            z = 1;
+            x++;
+        get_str_fmt:
+            if (x >= len)
+                goto invalid_string_format;
+            c = f->chr[x];
+            z++;
+            if (c == 32) {
+                x++;
+                goto get_str_fmt;
+            }
+            if (c != 92)
+                goto invalid_string_format;
+            string_size = z;
+        } // c==47
+        if (string_size) {
+            if (type == 0)
+                return s;    // s is the beginning of a new format but item has already been added to dest
+            if (type == 1) { // expected numeric format, not string format
+                error(13);   // type mismatch
+                return 0;
+            }
+            if (string_size != -1) {
+                s += string_size;
+                for (z = 0; z < string_size; z++) {
+                    if (z < pu_str->len)
+                        qbs1->chr[0] = pu_str->chr[z];
+                    else
+                        qbs1->chr[0] = 32;
+                    qbs_set(dest, qbs_add(dest, qbs1));
+                } // z
+            } else {
+                qbs_set(dest, qbs_add(dest, pu_str));
+                s++;
+            }
+            type = 0; // passed type added
+            if (s >= len)
+                return 0; // end of format line encountered and passed item added
+            goto scan;
+        } // string_size
+    }     // x<len
+invalid_string_format:
+
+    // add literal?
+    if ((f->chr[s] == 95) && (s < (len - 1))) { // trailing single _ in format is treated as a literal _
+        s++;
+    }
+    // add non-format character
+    qbs1->chr[0] = f->chr[s];
+    qbs_set(dest, qbs_add(dest, qbs1));
+
+    s++;
+    if (s >= len) {
+        s = 0;
+        if (type == 0)
+            return s; // end of format line encountered and passed item added
+        // illegal format? (format has been passed from start (s2=0) to end and has no numeric/string identifiers
+        if (s2 == 0) {
+            error(5); // illegal function call
+            return 0;
+        }
+    }
+    goto scan;
+
+    return 0;
+}
+
+int32 print_using_integer64(qbs *format, int64 value, int32 start, qbs *output) {
+    if (new_error)
+        return 0;
+#ifdef QB64_WINDOWS
+    pu_ndig = sprintf((char *)pu_buf, "% I64i", value);
+#else
+    pu_ndig = sprintf((char *)pu_buf, "% lli", value);
+#endif
+    if (pu_buf[0] == 45)
+        pu_neg = 1;
+    else
+        pu_neg = 0;
+    pu_ndig--; // remove sign
+    memcpy(pu_dig, &pu_buf[1], pu_ndig);
+    pu_dp = 0;
+    start = print_using(format, start, output, NULL);
+    return start;
+}
+
+int32 print_using_uinteger64(qbs *format, uint64 value, int32 start, qbs *output) {
+    if (new_error)
+        return 0;
+#ifdef QB64_WINDOWS
+    pu_ndig = sprintf((char *)pu_dig, "%I64u", value);
+#else
+    pu_ndig = sprintf((char *)pu_dig, "%llu", value);
+#endif
+    pu_neg = 0;
+    pu_dp = 0;
+    start = print_using(format, start, output, NULL);
+    return start;
+}
+
+int32 print_using_single(qbs *format, float value, int32 start, qbs *output) {
+    if (new_error)
+        return 0;
+    static int32 i, len, neg_exp;
+    static uint8 c;
+    static int64 exp;
+    len = sprintf((char *)&pu_buf, "% .255E", value); // 256 character limit ([1].[255])
+    pu_dp = 0;
+    pu_ndig = 0;
+    // 1. sign
+    if (pu_buf[0] == 45)
+        pu_neg = 1;
+    else
+        pu_neg = 0;
+    i = 1;
+// 2. digits before decimal place
+getdigits:
+    if (i >= len) {
+        error(5);
+        return 0;
+    }
+    c = pu_buf[i];
+    if ((c >= 48) && (c <= 57)) {
+        pu_dig[pu_ndig++] = c;
+        i++;
+        goto getdigits;
+    }
+    // 3. decimal place
+    if (c != 46) {
+        error(5);
+        return 0;
+    } // expected decimal point
+    i++;
+// 4. digits after decimal place
+getdigits2:
+    if (i >= len) {
+        error(5);
+        return 0;
+    }
+    c = pu_buf[i];
+    if ((c >= 48) && (c <= 57)) {
+        pu_dig[pu_ndig++] = c;
+        pu_dp--;
+        i++;
+        goto getdigits2;
+    }
+    // assume random character signifying an exponent
+    i++;
+    // optional exponent sign
+    neg_exp = 0;
+    if (i >= len) {
+        error(5);
+        return 0;
+    }
+    c = pu_buf[i];
+    if (c == 45) {
+        neg_exp = 1;
+        i++;
+    } //-
+    if (c == 43)
+        i++; //+
+    // assume remaining characters are an exponent
+    exp = 0;
+getdigits3:
+    if (i < len) {
+        c = pu_buf[i];
+        if ((c < 48) || (c > 57)) {
+            error(5);
+            return 0;
+        }
+        exp = exp * 10;
+        exp = exp + c - 48;
+        i++;
+        goto getdigits3;
+    }
+    if (neg_exp)
+        exp = -exp;
+    pu_dp += exp;
+    start = print_using(format, start, output, NULL);
+    return start;
+}
+
+int32 print_using_double(qbs *format, double value, int32 start, qbs *output) {
+    if (new_error)
+        return 0;
+    static int32 i, len, neg_exp;
+    static uint8 c;
+    static int64 exp;
+    len = sprintf((char *)&pu_buf, "% .255E", value); // 256 character limit ([1].[255])
+    pu_dp = 0;
+    pu_ndig = 0;
+    // 1. sign
+    if (pu_buf[0] == 45)
+        pu_neg = 1;
+    else
+        pu_neg = 0;
+    i = 1;
+// 2. digits before decimal place
+getdigits:
+    if (i >= len) {
+        error(5);
+        return 0;
+    }
+    c = pu_buf[i];
+    if ((c >= 48) && (c <= 57)) {
+        pu_dig[pu_ndig++] = c;
+        i++;
+        goto getdigits;
+    }
+    // 3. decimal place
+    if (c != 46) {
+        error(5);
+        return 0;
+    } // expected decimal point
+    i++;
+// 4. digits after decimal place
+getdigits2:
+    if (i >= len) {
+        error(5);
+        return 0;
+    }
+    c = pu_buf[i];
+    if ((c >= 48) && (c <= 57)) {
+        pu_dig[pu_ndig++] = c;
+        pu_dp--;
+        i++;
+        goto getdigits2;
+    }
+    // assume random character signifying an exponent
+    i++;
+    // optional exponent sign
+    neg_exp = 0;
+    if (i >= len) {
+        error(5);
+        return 0;
+    }
+    c = pu_buf[i];
+    if (c == 45) {
+        neg_exp = 1;
+        i++;
+    } //-
+    if (c == 43)
+        i++; //+
+    // assume remaining characters are an exponent
+    exp = 0;
+getdigits3:
+    if (i < len) {
+        c = pu_buf[i];
+        if ((c < 48) || (c > 57)) {
+            error(5);
+            return 0;
+        }
+        exp = exp * 10;
+        exp = exp + c - 48;
+        i++;
+        goto getdigits3;
+    }
+    if (neg_exp)
+        exp = -exp;
+    pu_dp += exp;
+    pu_exp_char = 68; //"D"
+    start = print_using(format, start, output, NULL);
+    pu_exp_char = 69; //"E"
+    return start;
+}
+
+// WARNING: DUE TO MINGW NOT SUPPORTING PRINTF long double, VALUES ARE CONVERTED TO A DOUBLE
+//         BUT PRINTED AS IF THEY WERE A long double
+int32 print_using_float(qbs *format, long double value, int32 start, qbs *output) {
+    if (new_error)
+        return 0;
+    static int32 i, len, neg_exp;
+    static uint8 c;
+    static int64 exp;
+// len=sprintf((char*)&pu_buf,"% .255E",value);//256 character limit ([1].[255])
+#ifdef QB64_MINGW
+    len = __mingw_sprintf((char *)&pu_buf, "% .255Lf", value); // 256 character limit ([1].[255])
+#else
+    len = sprintf((char *)&pu_buf, "% .255Lf", value); // 256 character limit ([1].[255])
+#endif
+
+    // qbs_print(qbs_new_txt((char*)&pu_buf),1);
+
+    pu_dp = 0;
+    pu_ndig = 0;
+    // 1. sign
+    if (pu_buf[0] == 45)
+        pu_neg = 1;
+    else
+        pu_neg = 0;
+    i = 1;
+// 2. digits before decimal place
+getdigits:
+    if (i >= len) {
+        error(5);
+        return 0;
+    }
+    c = pu_buf[i];
+    if ((c >= 48) && (c <= 57)) {
+        pu_dig[pu_ndig++] = c;
+        i++;
+        goto getdigits;
+    }
+    // 3. decimal place
+    if (c != 46) {
+        error(5);
+        return 0;
+    } // expected decimal point
+    i++;
+// 4. digits after decimal place
+getdigits2:
+    if (i >= len) {
+        // no exponent information has been provided
+        neg_exp = 0;
+        exp = 0;
+        goto no_exponent_provided;
+        // error(5); return 0;
+    }
+    c = pu_buf[i];
+    if ((c >= 48) && (c <= 57)) {
+        pu_dig[pu_ndig++] = c;
+        pu_dp--;
+        i++;
+        goto getdigits2;
+    }
+    // assume random character signifying an exponent
+    i++;
+    // optional exponent sign
+    neg_exp = 0;
+    if (i >= len) {
+        error(5);
+        return 0;
+    }
+    c = pu_buf[i];
+    if (c == 45) {
+        neg_exp = 1;
+        i++;
+    } //-
+    if (c == 43)
+        i++; //+
+    // assume remaining characters are an exponent
+    exp = 0;
+getdigits3:
+    if (i < len) {
+        c = pu_buf[i];
+        if ((c < 48) || (c > 57)) {
+            error(5);
+            return 0;
+        }
+        exp = exp * 10;
+        exp = exp + c - 48;
+        i++;
+        goto getdigits3;
+    }
+    if (neg_exp)
+        exp = -exp;
+    pu_dp += exp;
+no_exponent_provided:
+    pu_exp_char = 70; //"F"
+    start = print_using(format, start, output, NULL);
+    pu_exp_char = 69; //"E"
+    return start;
+}
+
+void sub_run_init() {
+    // Reset ON KEY trapping
+    // note: KEY bar F-key bindings are not affected
+    static int32 i;
+    for (i = 1; i <= 31; i++) {
+        onkey[i].id = 0;
+        onkey[i].active = 0;
+        onkey[i].state = 0;
+    }
+    onkey_inprogress = 0;
+    // note: if already in screen 0:80x25, screen pages are left intact
+    // set screen mode to 0 (80x25)
+    qbg_screen(0, NULL, 0, 0, NULL, 1 | 4 | 8);
+    // make sure WIDTH is 80x25
+    qbsub_width(NULL, 80, 25, 0, 0, 1 | 2);
+    // restore view print
+    qbg_sub_view_print(NULL, NULL, 0);
+    // restore palette
+    restorepalette(write_page);
+    // restore default colors
+    write_page->background_color = 0;
+    write_page->color = 7;
+    // note: cursor state does not appear to be reset by the RUN command
+    // im->cursor_show=0; im->cursor_firstvalue=4; im->cursor_lastvalue=4;
+    // Reset RND & RANDOMIZE state
+    rnd_seed = 327680;
+    rnd_seed_first = 327680; // Note: must contain the same value as rnd_seed
+    // clear keyboard buffers
+    sub__keyclear(NULL, 0);
+}
+
+void sub_run(qbs *f) {
+    if (new_error)
+        return;
+
+    // run program
+    static qbs *str = NULL;
+    if (str == NULL)
+        str = qbs_new(0, 0);
+    static qbs *strz = NULL;
+    if (!strz)
+        strz = qbs_new(0, 0);
+
+    qbs_set(str, f);
+    fixdir(str);
+
+#ifdef QB64_WINDOWS
+
+    qbs_set(strz, qbs_add(str, qbs_new_txt_len("\0", 1)));
+    if (WinExec((char *)strz->chr, SW_SHOWDEFAULT) > 31) {
+        goto run_exit;
+    } else {
+        // 0-out of resources/memory
+        // ERROR_BAD_FORMAT
+        // ERROR_FILE_NOT_FOUND
+        // ERROR_PATH_NOT_FOUND
+        error(53);
+        return; // file not found
+    }
+
+#else
+    qbs_set(strz, qbs_add(str, qbs_new_txt_len("\0", 1)));
+    system((char *)strz->chr);
+    // success?
+    goto run_exit;
+
+#endif
+
+// exit this program
+run_exit:
+    close_program = 1;
+    end();
+    exit(99); //<--this line should never actually be executed
+}
+
+#ifdef DEPENDENCY_ICON
+void sub__icon(int32 handle_icon, int32 handle_window_icon, int32 passed) {
+
+    if (new_error)
+        return;
+#    ifndef DEPENDENCY_CONSOLE_ONLY
+    if (!(passed & 2))
+        handle_window_icon = handle_icon;
+    if (!(passed & 1)) {
+        handle_icon = image_qbicon32_handle;
+        handle_window_icon = image_qbicon16_handle;
+    }
+
+    static int32 i, i2, ii, w, h;
+    static uint32 *o, *o2;
+    static int32 x, y, n, c, i3, c2;
+
+    // validation
+    for (ii = 1; ii <= 2; ii++) {
+        if (ii == 1)
+            i = handle_icon;
+        if (ii == 2)
+            i = handle_window_icon;
+        if (i >= 0) { // validate i
+            validatepage(i);
+            i = page[i];
+        } else {
+            i = -i;
+            if (i >= nextimg) {
+                error(258);
+                return;
+            }
+            if (!img[i].valid) {
+                error(258);
+                return;
+            }
+        }
+        if (img[i].text) {
+            error(5);
+            return;
+        }
+        if (ii == 1)
+            handle_icon = i;
+        if (ii == 2)
+            handle_window_icon = i;
+    }
+
+    if (!screen_hide) {
+        while (!window_exists) {
+            Sleep(100);
+        }
+
+#        ifdef QB64_WINDOWS
+        while (!window_handle) {
+            Sleep(100);
+        }
+
+        static HANDLE ExeIcon;
+        static HANDLE ExeIcon16;
+
+        // Attempt to load the first icon embedded in the .exe
+        if (!ExeIcon)
+            ExeIcon = LoadImage(GetModuleHandle(NULL), MAKEINTRESOURCE(0), IMAGE_ICON, 32, 32, 0);
+        if (!ExeIcon16)
+            ExeIcon16 = LoadImage(GetModuleHandle(NULL), MAKEINTRESOURCE(0), IMAGE_ICON, 16, 16, 0);
+
+        // If we have an embedded icon, we'll use it instead of QB64-PE's default
+        if (!(passed & 1) && (ExeIcon)) {
+            SendMessage(window_handle, WM_SETICON, ICON_BIG, (LPARAM)ExeIcon);
+
+            if (ExeIcon16) {
+                SendMessage(window_handle, WM_SETICON, ICON_SMALL, (LPARAM)ExeIcon16);
+            } else {
+                SendMessage(window_handle, WM_SETICON, ICON_SMALL, (LPARAM)ExeIcon);
+            }
+            return;
+        }
+        for (ii = 1; ii <= 2; ii++) {
+
+            if (ii == 1) {
+                i = handle_icon;
+                w = GetSystemMetrics(SM_CXICON);
+                h = GetSystemMetrics(SM_CYICON);
+            }
+            if (ii == 2) {
+                i = handle_window_icon;
+                w = GetSystemMetrics(SM_CXSMICON);
+                h = GetSystemMetrics(SM_CYSMICON);
+            }
+
+            // source[http://support.microsoft.com/kb/318876]
+            ICONINFO iinfo;
+            HDC hdc;
+            BITMAPV5HEADER bi;
+            HBITMAP hBitmap, hOldBitmap;
+            void *lpBits;
+            HCURSOR hAlphaCursor = NULL;
+            ZeroMemory(&bi, sizeof(BITMAPV5HEADER));
+            bi.bV5Size = sizeof(BITMAPV5HEADER);
+            bi.bV5Width = w;
+            bi.bV5Height = h;
+            bi.bV5Planes = 1;
+            bi.bV5BitCount = 32;
+            bi.bV5Compression = BI_BITFIELDS;
+            // The following mask specification specifies a supported 32 BPP
+            // alpha format for Windows XP.
+            bi.bV5RedMask = 0x00FF0000;
+            bi.bV5GreenMask = 0x0000FF00;
+            bi.bV5BlueMask = 0x000000FF;
+            bi.bV5AlphaMask = 0xFF000000;
+            hdc = GetDC(NULL);
+            // Create the DIB section with an alpha channel.
+            hBitmap = CreateDIBSection(hdc, (BITMAPINFO *)&bi, DIB_RGB_COLORS, (void **)&lpBits, NULL, (DWORD)0);
+            ReleaseDC(NULL, hdc);
+
+            i2 = func__newimage(w, h, 32, 1);
+            sub__dontblend(i2, 1);
+            sub__putimage(NULL, NULL, NULL, NULL, -i, i2, NULL, NULL, NULL, NULL, 8 + 32);
+
+            o = img[-i2].offset32;
+            o2 = (uint32 *)lpBits;
+            for (y = 0; y < h; y++) {
+                for (x = 0; x < w; x++) {
+                    c = o[(h - 1 - y) * w + x];
+                    o2[y * w + x] = c;
+                }
+            }
+
+            sub__freeimage(i2, 1);
+
+            // Create an empty mask bitmap.
+            HBITMAP hMonoBitmap = CreateBitmap(w, h, 1, 1, NULL);
+
+            iinfo.fIcon = TRUE; // Change fIcon to TRUE to create an alpha icon
+            iinfo.xHotspot = 0;
+            iinfo.yHotspot = 0;
+            iinfo.hbmMask = hMonoBitmap;
+            iinfo.hbmColor = hBitmap;
+            // Create the alpha cursor with the alpha DIB section.
+            hAlphaCursor = CreateIconIndirect(&iinfo);
+
+            DeleteObject(hBitmap);
+            DeleteObject(hMonoBitmap);
+
+            if (ii == 1)
+                SendMessage(window_handle, WM_SETICON, ICON_BIG, (LPARAM)hAlphaCursor);
+            if (ii == 2)
+                SendMessage(window_handle, WM_SETICON, ICON_SMALL, (LPARAM)hAlphaCursor);
+
+        } // ii
+
+#        endif // QB64_WINDOWS
+    }          //! screen_hide
+#    endif     // DEPENDENCY_CONSOLE_ONLY
+} // sub__icon
+#endif // DEPENDENCY_ICON
+
+int32 func_screenwidth() {
+#ifdef QB64_WINDOWS
+    return GetSystemMetrics(SM_CXSCREEN);
+#else
+#    ifdef QB64_GLUT
+    return glutGet(GLUT_SCREEN_WIDTH);
+#    else
+    return 0;
+#    endif
+#endif
+}
+
+int32 func_screenheight() {
+#ifdef QB64_WINDOWS
+    return GetSystemMetrics(SM_CYSCREEN);
+#else
+#    ifdef QB64_GLUT
+    return glutGet(GLUT_SCREEN_HEIGHT);
+#    else
+    return 0;
+#    endif
+#endif
+}
+
+void sub_screenicon() {
+#ifdef QB64_GLUT
+    while (!window_exists) {
+        Sleep(100);
+    }
+#    ifdef QB64_WINDOWS
+
+    while (!window_handle) {
+        Sleep(100);
+    }
+#    endif
+    glutIconifyWindow();
+    return;
+#endif
+}
+
+int32 func_windowexists() {
+#ifdef QB64_GLUT
+#    ifdef QB64_WINDOWS
+    if (!window_handle) {
+        return 0;
+    }
+#    endif
+    return -window_exists;
+#else
+    return -1;
+#endif
+}
+
+int32 func_screenicon() {
+#ifdef QB64_GLUT
+    while (!window_exists) {
+        Sleep(100);
+    }
+#    ifdef QB64_WINDOWS
+    while (!window_handle) {
+        Sleep(100);
+    }
+#    endif
+    extern int32 screen_hide;
+    if (screen_hide) {
+        error(5);
+        return 0;
+    }
+#    ifdef QB64_WINDOWS
+    return -IsIconic(window_handle);
+#    else
+    /*
+        Linux code not compiling for now
+        #include <X11/X.h>
+        #include <X11/Xlib.h>
+        extern Display *X11_display;
+        extern Window X11_window;
+        extern int32 screen_hide;
+        XWindowAttributes attribs;
+        while (!(X11_display && X11_window));
+        XGetWindowAttributes(X11_display, X11_window, &attribs);
+        if (attribs.map_state == IsUnmapped) return -1;
+        return 0;
+    #endif */
+    return 0; // if we get here and haven't exited already, we failed somewhere along the way.
+#    endif
+#endif
+}
+
+int32 func__autodisplay() {
+    if (autodisplay) {
+        return -1;
+    }
+    return 0;
+}
+void sub__autodisplay() { autodisplay = 1; }
+
+void sub__display() {
+
+    if (screen_hide)
+        return;
+
+    // disable autodisplay (if enabled)
+    if (autodisplay) {
+        autodisplay = -1; // toggle request
+        while (autodisplay)
+            Sleep(1);
+        return; // note: autodisplay is set to 0 after display() has been called so a second call to display() is unnecessary
+    }
+    display();
+}
+
+int32 sub_draw_i;
+uint8 *sub_draw_cp;
+int32 sub_draw_len;
+
+int32 draw_num_invalid;
+int32 draw_num_undefined;
+double draw_num() {
+    static int32 c, dp, vptr, x, offset;
+    static double d, dp_mult, sgn;
+
+    draw_num_invalid = 0;
+    draw_num_undefined = 1;
+    d = 0;
+    dp = 0;
+    sgn = 1;
+    vptr = 0;
+
+nextchar:
+    if (sub_draw_i >= sub_draw_len)
+        return d * sgn;
+    c = sub_draw_cp[sub_draw_i];
+
+    if (vptr) {
+        if ((sub_draw_i + 2) >= sub_draw_len) {
+            draw_num_invalid = 1;
+            return 0;
+        } // not enough data!
+        offset = sub_draw_cp[sub_draw_i + 2] * 256 + sub_draw_cp[sub_draw_i + 1];
+        sub_draw_i += 3;
+        vptr = 0;
+        /*
+            'BYTE=1
+            'INTEGER=2
+            'STRING=3 (unsupported)
+            'SINGLE=4
+            'INT64=5
+            'FLOAT=6
+            'DOUBLE=8
+            'LONG=20
+            'BIT=64+n (unsupported)
+        */
+        if (c == 1) {
+            d = *((int8 *)(&cmem[1280 + offset]));
+            goto nextcharv;
+        }
+        if (c == (1 + 128)) {
+            d = *((uint8 *)(&cmem[1280 + offset]));
+            goto nextcharv;
+        }
+        if (c == 2) {
+            d = *((int16 *)(&cmem[1280 + offset]));
+            goto nextcharv;
+        }
+        if (c == (2 + 128)) {
+            d = *((uint16 *)(&cmem[1280 + offset]));
+            goto nextcharv;
+        }
+        if (c == 4) {
+            d = *((float *)(&cmem[1280 + offset]));
+            goto nextcharv;
+        }
+        if (c == 5) {
+            d = *((int64 *)(&cmem[1280 + offset]));
+            goto nextcharv;
+        }
+        if (c == (5 + 128)) {
+            d = *((uint64 *)(&cmem[1280 + offset]));
+            goto nextcharv;
+        }
+        if (c == 6) {
+            d = *((long double *)(&cmem[1280 + offset]));
+            goto nextcharv;
+        }
+        if (c == 8) {
+            d = *((double *)(&cmem[1280 + offset]));
+            goto nextcharv;
+        }
+        if (c == 20) {
+            d = *((int32 *)(&cmem[1280 + offset]));
+            goto nextcharv;
+        }
+        if (c == (20 + 128)) {
+            d = *((uint32 *)(&cmem[1280 + offset]));
+            goto nextcharv;
+        }
+        // unknown/unsupported types(bit/string) return an error
+        draw_num_invalid = 1;
+        return 0;
+    nextcharv:
+        draw_num_invalid = 0;
+        draw_num_undefined = 0;
+        return d;
+    }
+
+    if ((c == 32) || (c == 9)) {
+        sub_draw_i++;
+        goto nextchar;
+    } // skip whitespace
+
+    if ((c >= 48) && (c <= 57)) {
+        c -= 48;
+        if (dp) {
+            d += (((double)c) * dp_mult);
+            dp_mult /= 10.0;
+        } else {
+            d = (d * 10) + c;
+        }
+        draw_num_undefined = 0;
+        draw_num_invalid = 0;
+        sub_draw_i++;
+        goto nextchar;
+    }
+
+    if (c == 45) { //-
+        if (dp || (!draw_num_undefined))
+            return d * sgn;
+        sgn = -sgn;
+        draw_num_invalid = 1;
+        sub_draw_i++;
+        goto nextchar;
+    }
+
+    if (c == 43) { //+
+        if (dp || (!draw_num_undefined))
+            return d * sgn;
+        draw_num_invalid = 1;
+        sub_draw_i++;
+        goto nextchar;
+    }
+
+    if (c == 46) { //.
+        if (dp)
+            return d * sgn;
+        dp = 1;
+        dp_mult = 0.1;
+        if (!draw_num_undefined)
+            draw_num_invalid = 1;
+        sub_draw_i++;
+        goto nextchar;
+    }
+
+    if (c == 61) { //=
+        if (draw_num_invalid || dp || (!draw_num_undefined)) {
+            draw_num_invalid = 1;
+            return 0;
+        } // leading data invalid!
+        vptr = 1;
+        sub_draw_i++;
+        goto nextchar;
+    }
+
+    return d * sgn;
+}
+
+void sub_draw(qbs *s) {
+    if (new_error)
+        return;
+
+    /*
+
+        Aspect ratio determination:
+        32/256 modes always assume 1:1 ratio
+        All other modes (1-13) determine their aspect ratio from the destination surface's dimensions (presuming it is stretched onto a 4:3 ratio monitor)
+
+        Reference:
+        Line-drawing and cursor-movement commands:
+        D[n%]            Moves cursor down n% units.
+        E[n%]            Moves cursor up and right n% units.
+        F[n%]            Moves cursor down and right n% units.
+        G[n%]            Moves cursor down and left n% units.
+        H[n%]            Moves cursor up and left n% units.
+        L[n%]            Moves cursor left n% units.
+        M[{+|-}]x%,y%    Moves cursor to point x%,y%. If x% is preceded
+        by + or -, moves relative to the current point.
+        -+/- relative ONLY if after the M, after comma doesn't affect method
+        -nothing to do with VIEW/WINDOW coordinates (but still clipped)
+        R[n%]            Moves cursor right n% units.
+        U[n%]            Moves cursor up n% units.
+        [B]              Optional prefix that moves cursor without drawing.
+        [N]              Optional prefix that draws and returns cursor to
+        its original position.
+        *Prefixes B&N can be used anywhere. They set (not toggle) their respective states. They are only cleared if they are used in a statement. They are
+       forgotten when a new DRAW statement is called. Color, rotation, and scale commands: An%              Rotates an object n% * 90 degrees (n% can be 0, 1,
+        2, or 3).
+        Cn%              Sets the drawing color (n% is a color attribute).
+
+        Pn1%,n2%         Sets the paint fill and border colors of an object
+        (n1% is the fill-color attribute, n2% is the
+        border-color attribute).
+        Sn%              Determines the drawing scale by setting the length
+        of a unit of cursor movement. The default n% is 4,
+        which is equivalent to 1 pixel.
+        TAn%             Turns an angle n% degrees (-360 through 360).
+
+        -If you omit n% from line-drawing and cursor-movement commands, the
+        cursor moves 1 unit.
+        -To execute a DRAW command substring from a DRAW command string, use
+        the "X" command:
+        DRAW "X"+ VARPTR$(commandstring$)
+    */
+
+    static double r, ir, vx, vy, hx, hy, ex, ey, fx, fy, xx, yy, px, py, px2, py2, d, d2, sin_ta, cos_ta;
+    static int64 c64, c64b, c64c;
+    static uint32 col;
+    static int32 x, c, prefix_b, prefix_n, offset;
+    static uint8 *stack_s[8192];
+    static uint16 stack_len[8192];
+    static uint16 stack_i[8192];
+    static int32 stacksize;
+    static double draw_ta;
+    static double draw_scale;
+
+    if (write_page->text) {
+        error(5);
+        return;
+    }
+
+    draw_ta = write_page->draw_ta;
+    draw_scale = write_page->draw_scale;
+
+    if (write_page->compatible_mode <= 13) {
+        if (write_page->compatible_mode == 1)
+            r = 4.0 / ((3.0 / 200.0) * 320.0);
+        if (write_page->compatible_mode == 2)
+            r = 4.0 / ((3.0 / 200.0) * 640.0);
+        if (write_page->compatible_mode == 7)
+            r = 4.0 / ((3.0 / 200.0) * 320.0);
+        if (write_page->compatible_mode == 8)
+            r = 4.0 / ((3.0 / 200.0) * 640.0);
+        if (write_page->compatible_mode == 9)
+            r = 4.0 / ((3.0 / 350.0) * 640.0);
+        if (write_page->compatible_mode == 10)
+            r = 4.0 / ((3.0 / 350.0) * 640.0);
+        if (write_page->compatible_mode == 11)
+            r = 4.0 / ((3.0 / 480.0) * 640.0);
+        if (write_page->compatible_mode == 12)
+            r = 4.0 / ((3.0 / 480.0) * 640.0);
+        if (write_page->compatible_mode == 13)
+            r = 4.0 / ((3.0 / 200.0) * 320.0);
+        // Old method: r=4.0 /( (3.0/((double)write_page->height)) * ((double)write_page->width) ); //calculate aspect ratio of image
+        ir = 1 / r; // note: all drawing must multiply the x offset by ir (inverse ratio)
+    } else {
+        r = 1;
+        ir = 1;
+    }
+
+    vx = 0;
+    vy = -1;
+    ex = r;
+    ey = -1;
+    hx = r;
+    hy = 0;
+    fx = r;
+    fy = 1; // reset vectors
+    // rotate vectors by ta?
+    if (draw_ta) {
+        d = draw_ta * 0.0174532925199433;
+        sin_ta = sin(d);
+        cos_ta = cos(d);
+        px2 = vx;
+        py2 = vy;
+        vx = px2 * cos_ta + py2 * sin_ta;
+        vy = py2 * cos_ta - px2 * sin_ta;
+        px2 = hx;
+        py2 = hy;
+        hx = px2 * cos_ta + py2 * sin_ta;
+        hy = py2 * cos_ta - px2 * sin_ta;
+        px2 = ex;
+        py2 = ey;
+        ex = px2 * cos_ta + py2 * sin_ta;
+        ey = py2 * cos_ta - px2 * sin_ta;
+        px2 = fx;
+        py2 = fy;
+        fx = px2 * cos_ta + py2 * sin_ta;
+        fy = py2 * cos_ta - px2 * sin_ta;
+    }
+
+    // convert x,y image position into a pixel coordinate
+    if (write_page->clipping_or_scaling) {
+        if (write_page->clipping_or_scaling == 2) {
+            px = write_page->x * write_page->scaling_x + write_page->scaling_offset_x + write_page->view_offset_x;
+            py = write_page->y * write_page->scaling_y + write_page->scaling_offset_y + write_page->view_offset_y;
+        } else {
+            px = write_page->x + write_page->view_offset_x;
+            py = write_page->y + write_page->view_offset_y;
+        }
+    } else {
+        px = write_page->x;
+        py = write_page->y;
+    }
+
+    col = write_page->draw_color;
+    prefix_b = 0;
+    prefix_n = 0;
+
+    stacksize = 0;
+
+    sub_draw_cp = s->chr;
+    sub_draw_len = s->len;
+    sub_draw_i = 0;
+
+nextchar:
+    if (sub_draw_i >= sub_draw_len) {
+
+        // revert from X-stack
+        if (stacksize) {
+            stacksize--;
+            sub_draw_cp = stack_s[stacksize];
+            sub_draw_len = stack_len[stacksize];
+            sub_draw_i = stack_i[stacksize]; // restore state
+            // continue
+            goto nextchar;
+        }
+
+        // revert px,py to image->x,y offsets
+        if (write_page->clipping_or_scaling) {
+            if (write_page->clipping_or_scaling == 2) {
+                px = (px - write_page->view_offset_x - write_page->scaling_offset_x) / write_page->scaling_x;
+                py = (py - write_page->view_offset_y - write_page->scaling_offset_y) / write_page->scaling_y;
+            } else {
+                px = px - write_page->view_offset_x;
+                py = py - write_page->view_offset_y;
+            }
+        }
+        write_page->x = px;
+        write_page->y = py;
+        return;
+    }
+    c = sub_draw_cp[sub_draw_i];
+
+    if ((c >= 97) && (c <= 122))
+        c -= 32; // ucase c
+
+    if (c == 77) { // M
+    m_nextchar:
+        sub_draw_i++;
+        if (sub_draw_i >= sub_draw_len) {
+            error(5);
+            return;
+        }
+        c = sub_draw_cp[sub_draw_i];
+        if ((c == 32) || (c == 9))
+            goto m_nextchar; // skip whitespace
+        // check for absolute/relative positioning
+        if ((c == 43) || (c == 45))
+            x = 1;
+        else
+            x = 0;
+        px2 = draw_num();
+        if (draw_num_invalid || draw_num_undefined) {
+            error(5);
+            return;
+        }
+        c = sub_draw_cp[sub_draw_i];
+        if (c != 44) {
+            error(5);
+            return;
+        } // expected ,
+        sub_draw_i++;
+        py2 = draw_num();
+        if (draw_num_invalid || draw_num_undefined) {
+            error(5);
+            return;
+        }
+        if (x) { // relative positioning
+            xx = (px2 * ir) * hx - (py2 * ir) * vx;
+            yy = px2 * hy - py2 * vy;
+            px2 = px + xx * draw_scale;
+            py2 = py + yy * draw_scale;
+        }
+        if (!prefix_b)
+            fast_line(qbr(px), qbr(py), qbr(px2), qbr(py2), col);
+        if (!prefix_n) {
+            px = px2;
+            py = py2;
+        } // update position
+        prefix_b = 0;
+        prefix_n = 0;
+        goto nextchar;
+    }
+
+    if (c == 84) { // T(A)
+    ta_nextchar:
+        sub_draw_i++;
+        if (sub_draw_i >= sub_draw_len) {
+            error(5);
+            return;
+        }
+        c = sub_draw_cp[sub_draw_i];
+        if ((c == 32) || (c == 9))
+            goto ta_nextchar; // skip whitespace
+        if ((c != 65) && (c != 97)) {
+            error(5);
+            return;
+        } // not TA
+        sub_draw_i++;
+        d = draw_num();
+        if (draw_num_invalid || draw_num_undefined) {
+            error(5);
+            return;
+        }
+        draw_ta = d;
+        write_page->draw_ta = draw_ta;
+    ta_entry:
+        // note: ta rotation is not relative to previous angle
+        vx = 0;
+        vy = -1;
+        ex = r;
+        ey = -1;
+        hx = r;
+        hy = 0;
+        fx = r;
+        fy = 1; // reset vectors
+        // rotate vectors by ta
+        d = draw_ta * 0.0174532925199433;
+        sin_ta = sin(d);
+        cos_ta = cos(d);
+        px2 = vx;
+        py2 = vy;
+        vx = px2 * cos_ta + py2 * sin_ta;
+        vy = py2 * cos_ta - px2 * sin_ta;
+        px2 = hx;
+        py2 = hy;
+        hx = px2 * cos_ta + py2 * sin_ta;
+        hy = py2 * cos_ta - px2 * sin_ta;
+        px2 = ex;
+        py2 = ey;
+        ex = px2 * cos_ta + py2 * sin_ta;
+        ey = py2 * cos_ta - px2 * sin_ta;
+        px2 = fx;
+        py2 = fy;
+        fx = px2 * cos_ta + py2 * sin_ta;
+        fy = py2 * cos_ta - px2 * sin_ta;
+        goto nextchar;
+    }
+
+    if (c == 85) {
+        xx = vx;
+        yy = vy;
+        goto udlr;
+    } // U
+    if (c == 68) {
+        xx = -vx;
+        yy = -vy;
+        goto udlr;
+    } // D
+    if (c == 76) {
+        xx = -hx;
+        yy = -hy;
+        goto udlr;
+    } // L
+    if (c == 82) {
+        xx = hx;
+        yy = hy;
+        goto udlr;
+    } // R
+
+    if (c == 69) {
+        xx = ex;
+        yy = ey;
+        goto udlr;
+    } // E
+    if (c == 70) {
+        xx = fx;
+        yy = fy;
+        goto udlr;
+    } // F
+    if (c == 71) {
+        xx = -ex;
+        yy = -ey;
+        goto udlr;
+    } // G
+    if (c == 72) {
+        xx = -fx;
+        yy = -fy;
+        goto udlr;
+    } // H
+
+    if (c == 67) { // C
+        sub_draw_i++;
+        d = draw_num();
+        if (draw_num_invalid || draw_num_undefined) {
+            error(5);
+            return;
+        }
+        c64 = d;
+        xx = c64;
+        if (xx != d) {
+            error(5);
+            return;
+        } // non-integer
+        // if (c64<0){error(5); return;}
+        // c64b=1; c64b<<=write_page->bits_per_pixel; c64b--;
+        // if (c64>c64b){error(5); return;}
+        col = c64;
+        write_page->draw_color = col;
+        goto nextchar;
+    }
+
+    if (c == 66) { // B (move without drawing prefix)
+        prefix_b = 1;
+        sub_draw_i++;
+        goto nextchar;
+    }
+
+    if (c == 78) { // N (draw without moving)
+        prefix_n = 1;
+        sub_draw_i++;
+        goto nextchar;
+    }
+
+    if (c == 83) { // S
+        sub_draw_i++;
+        d = draw_num();
+        if (draw_num_invalid || draw_num_undefined) {
+            error(5);
+            return;
+        }
+        if (d < 0) {
+            error(5);
+            return;
+        }
+        draw_scale = d / 4.0;
+        write_page->draw_scale = draw_scale;
+        goto nextchar;
+    }
+
+    if (c == 80) { // P
+        sub_draw_i++;
+        d = draw_num();
+        if (draw_num_invalid || draw_num_undefined) {
+            error(5);
+            return;
+        }
+        c64 = d;
+        xx = c64;
+        if (xx != d) {
+            error(5);
+            return;
+        } // non-integer
+        // if (c64<0){error(5); return;}
+        // c64b=1; c64b<<=write_page->bits_per_pixel; c64b--;
+        // if (c64>c64b){error(5); return;}
+        c64c = c64;
+        c = sub_draw_cp[sub_draw_i];
+        if (c != 44) {
+            error(5);
+            return;
+        } // expected ,
+        sub_draw_i++;
+        d = draw_num();
+        if (draw_num_invalid || draw_num_undefined) {
+            error(5);
+            return;
+        }
+        c64 = d;
+        xx = c64;
+        if (xx != d) {
+            error(5);
+            return;
+        } // non-integer
+        // if (c64<0){error(5); return;}
+        // c64b=1; c64b<<=write_page->bits_per_pixel; c64b--;
+        // if (c64>c64b){error(5); return;}
+        // revert px,py to x,y offsets
+        if (write_page->clipping_or_scaling) {
+            if (write_page->clipping_or_scaling == 2) {
+                xx = (px - write_page->view_offset_x - write_page->scaling_offset_x) / write_page->scaling_x;
+                yy = (py - write_page->view_offset_y - write_page->scaling_offset_y) / write_page->scaling_y;
+            } else {
+                xx = px - write_page->view_offset_x;
+                yy = py - write_page->view_offset_y;
+            }
+        } else {
+            xx = px;
+            yy = py;
+        }
+        sub_paint(xx, yy, c64c, c64, NULL, 2 + 4);
+        col = c64c;
+        goto nextchar;
+    }
+
+    if (c == 65) { // A
+        sub_draw_i++;
+        d = draw_num();
+        if (draw_num_invalid || draw_num_undefined) {
+            error(5);
+            return;
+        }
+        if (d == 0) {
+            draw_ta = 0;
+            write_page->draw_ta = draw_ta;
+            goto ta_entry;
+        }
+        if (d == 1) {
+            draw_ta = 90;
+            write_page->draw_ta = draw_ta;
+            goto ta_entry;
+        }
+        if (d == 2) {
+            draw_ta = 180;
+            write_page->draw_ta = draw_ta;
+            goto ta_entry;
+        }
+        if (d == 3) {
+            draw_ta = 270;
+            write_page->draw_ta = draw_ta;
+            goto ta_entry;
+        }
+        error(5);
+        return; // invalid value
+    }
+
+    if (c == 88) { // X
+        sub_draw_i++;
+        if ((sub_draw_i + 2) >= sub_draw_len) {
+            error(5);
+            return;
+        }
+        if (sub_draw_cp[sub_draw_i] != 3) {
+            error(5);
+            return;
+        }
+        offset = sub_draw_cp[sub_draw_i + 2] * 256 + sub_draw_cp[sub_draw_i + 1]; // offset of string descriptor in DBLOCK
+        sub_draw_i += 3;
+        if (stacksize == 8192) {
+            error(6);
+            return;
+        } // X-stack "OVERFLOW" (should never occur because DBLOCK will overflow first)
+        stack_s[stacksize] = sub_draw_cp;
+        stack_len[stacksize] = sub_draw_len;
+        stack_i[stacksize] = sub_draw_i;
+        stacksize++; // backup state
+        // set new state
+        sub_draw_i = 0;
+        x = cmem[1280 + offset + 3] * 256 + cmem[1280 + offset + 2];
+        sub_draw_cp = &cmem[1280] + x;
+        sub_draw_len = cmem[1280 + offset + 1] * 256 + cmem[1280 + offset + 0];
+        // continue processing
+        goto nextchar;
+    }
+
+    if ((c == 32) || (c == 9) || (c == 59)) {
+        sub_draw_i++;
+        goto nextchar;
+    } // skip whitespace/semicolons
+
+    error(5);
+    return; // unknown command encountered!
+
+udlr:
+    sub_draw_i++;
+    d = draw_num();
+    if (draw_num_invalid) {
+        error(5);
+        return;
+    }
+    if (draw_num_undefined)
+        d = 1;
+    xx *= d;
+    yy *= d;
+    //***apply scaling here***
+    xx = xx * ir;
+    px2 = px + xx * draw_scale;
+    py2 = py + yy * draw_scale;
+    if (!prefix_b)
+        fast_line(qbr(px), qbr(py), qbr(px2), qbr(py2), col);
+    if (!prefix_n) {
+        px = px2;
+        py = py2;
+    } // update position
+    prefix_b = 0;
+    prefix_n = 0;
+    goto nextchar;
+}
+
+#ifdef QB64_WINDOWS
+#    define envp _environ
+#else
+extern char **environ;
+#    define envp environ
+#endif
+
+int32 func__environcount() {
+    // count array bound
+    char **p = envp;
+    while (*++p)
+        ;
+    return p - envp;
+}
+
+qbs *func_environ(qbs *name) {
+    char *query, *result;
+    qbs *tqbs;
+    query = (char *)malloc(name->len + 1);
+    query[name->len] = '\0'; // add NULL terminator
+    memcpy(query, name->chr, name->len);
+    result = getenv(query);
+    if (result) {
+        int result_length = strlen(result);
+        tqbs = qbs_new(result_length, 1);
+        memcpy(tqbs->chr, result, result_length);
+    } else {
+        tqbs = qbs_new(0, 1);
+    }
+    return tqbs;
+}
+
+qbs *func_environ(int32 number) {
+    char *result;
+    qbs *tqbs;
+    int result_length;
+    if (number <= 0) {
+        tqbs = qbs_new(0, 1);
+        error(5);
+        return tqbs;
+    }
+    // Check we do not go beyond array bound
+    char **p = envp;
+    while (*++p)
+        ;
+    if (number > p - envp) {
+        tqbs = qbs_new(0, 1);
+        return tqbs;
+    }
+    result = envp[number - 1];
+    result_length = strlen(result);
+    tqbs = qbs_new(result_length, 1);
+    memcpy(tqbs->chr, result, result_length);
+    return tqbs;
+}
+
+void sub_environ(qbs *str) {
+    char *buf;
+    char *separator;
+    buf = (char *)malloc(str->len + 1);
+    buf[str->len] = '\0';
+    memcpy(buf, str->chr, str->len);
+    // Name and value may be separated by = or space
+    separator = strchr(buf, ' ');
+    if (!separator) {
+        separator = strchr(buf, '=');
+    }
+    if (!separator) {
+        // It is an error is there is no separator
+        error(5);
+        return;
+    }
+    // Split into two separate strings
+    *separator = '\0';
+    if (separator == &buf[str->len] - 1) {
+        // Separator is at end of string, so remove the variable
+#ifdef QB64_WINDOWS
+        *separator = '=';
+        _putenv(buf);
+#else
+        unsetenv(buf);
+#endif
+    } else {
+#ifdef QB64_WINDOWS
+#    if WINVER >= 0x0600
+        _putenv_s(buf, separator + 1);
+#    else
+        *separator = '=';
+        _putenv(buf);
+#    endif
+#else
+        setenv(buf, separator + 1, 1);
+#endif
+    }
+    free(buf);
+}
+
+#ifdef QB64_WINDOWS
+void showvalue(__int64 v) {
+    static qbs *s = NULL;
+    if (s == NULL)
+        s = qbs_new(0, 0);
+    qbs_set(s, qbs_str(v));
+    MessageBox2(NULL, (char *)s->chr, "showvalue", MB_OK | MB_SYSTEMMODAL);
+}
+#endif
+
+// Referenced: http://johnnie.jerrata.com/winsocktutorial/
+// Much of the unix sockets code based on http://beej.us/guide/bgnet/
+#ifdef QB64_WINDOWS
+#    include <winsock2.h>
+WSADATA wsaData;
+WORD sockVersion;
+#else
+#    include <netdb.h>
+#    include <sys/socket.h>
+#    include <sys/types.h>
+#endif
+
+#define NETWORK_ERROR -1
+#define NETWORK_OK 0
+
+void tcp_init() {
+    static int32 init = 0;
+    if (!init) {
+        init = 1;
+#if !defined(DEPENDENCY_SOCKETS)
+#elif defined(QB64_WINDOWS)
+        sockVersion = MAKEWORD(1, 1);
+        WSAStartup(sockVersion, &wsaData);
+#endif
+    }
+}
+
+void tcp_done() {
+#if !defined(DEPENDENCY_SOCKETS)
+#elif defined(QB64_WINDOWS)
+    WSACleanup();
+#endif
+}
+
+struct tcp_connection {
+#if !defined(DEPENDENCY_SOCKETS)
+#elif defined(QB64_WINDOWS)
+    SOCKET socket;
+#elif defined(QB64_UNIX)
+    int socket;
+#else
+#endif
+    int32 port;      // connection to host & clients only
+    uint8 ip4[4];    // connection to host only
+    uint8 *hostname; // clients only
+    int connected;
+};
+
+void *tcp_host_open(int64 port) {
+    tcp_init();
+    if ((port < 0) || (port > 65535))
+        return NULL;
+#if !defined(DEPENDENCY_SOCKETS)
+    return NULL;
+#elif defined(QB64_WINDOWS)
+    // Ref. from 'winsock.h': typedef u_int SOCKET;
+    static SOCKET listeningSocket;
+    listeningSocket = socket(AF_INET,      // Go over TCP/IP
+                             SOCK_STREAM,  // This is a stream-oriented socket
+                             IPPROTO_TCP); // Use TCP rather than UDP
+    if (listeningSocket == INVALID_SOCKET)
+        return NULL;
+    static SOCKADDR_IN serverInfo;
+    serverInfo.sin_family = AF_INET;
+    serverInfo.sin_addr.s_addr = INADDR_ANY; // Since this socket is listening for connections,
+    // any local address will do
+    serverInfo.sin_port = htons(port); // Convert integer port to network-byte order
+    // and insert into the port field
+    // Bind the socket to our local server address
+    static int nret;
+    nret = bind(listeningSocket, (LPSOCKADDR)&serverInfo, sizeof(struct sockaddr));
+    if (nret == SOCKET_ERROR) {
+        closesocket(listeningSocket);
+        return NULL;
+    }
+    nret = listen(listeningSocket, SOMAXCONN); // Up to x connections may wait at any
+    // one time to be accept()'ed
+    if (nret == SOCKET_ERROR) {
+        closesocket(listeningSocket);
+        return NULL;
+    }
+    static u_long iMode;
+    iMode = 1;
+    ioctlsocket(listeningSocket, FIONBIO, &iMode);
+
+    static tcp_connection *connection;
+    connection = (tcp_connection *)calloc(sizeof(tcp_connection), 1);
+    connection->socket = listeningSocket;
+    connection->connected = -1;
+    return (void *)connection;
+#elif defined(QB64_UNIX)
+    struct addrinfo hints, *servinfo, *p;
+    int sockfd;
+    char str_port[6];
+    int yes = 1;
+    snprintf(str_port, 6, "%d", port);
+    memset(&hints, 0, sizeof(hints));
+    hints.ai_family = AF_INET;
+    hints.ai_socktype = SOCK_STREAM;
+    hints.ai_flags = AI_PASSIVE;
+    if (getaddrinfo(NULL, str_port, &hints, &servinfo) != 0)
+        return NULL;
+    for (p = servinfo; p != NULL; p = p->ai_next) {
+        sockfd = socket(p->ai_family, p->ai_socktype, p->ai_protocol);
+        if (sockfd == -1)
+            continue;
+        setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(int));
+        if (::bind(sockfd, p->ai_addr, p->ai_addrlen) == -1) {
+            close(sockfd);
+            continue;
+        }
+        break; // if we get here, all is good
+    }
+    freeaddrinfo(servinfo);
+    if (p == NULL)
+        return NULL;                    // indicates none of the entries succeeded
+    fcntl(sockfd, F_SETFL, O_NONBLOCK); // make socket non-blocking
+
+    if (listen(sockfd, SOMAXCONN) == -1) {
+        close(sockfd);
+        return NULL;
+    }
+
+    tcp_connection *connection;
+    connection = (tcp_connection *)calloc(sizeof(tcp_connection), 1);
+    connection->socket = sockfd;
+    connection->connected = -1;
+    return (void *)connection;
+#else
+    return NULL;
+#endif
+}
+
+void *tcp_client_open(uint8 *host, int64 port) {
+
+    tcp_init();
+
+    if ((port < 0) || (port > 65535))
+        return NULL;
+#if !defined(DEPENDENCY_SOCKETS)
+    return NULL;
+#elif defined(QB64_WINDOWS)
+    static LPHOSTENT hostEntry;
+    hostEntry = gethostbyname((char *)host);
+    if (!hostEntry)
+        return NULL;
+    // Ref. from 'winsock.h': typedef u_int SOCKET;
+    static SOCKET theSocket;
+    theSocket = socket(AF_INET,      // Go over TCP/IP
+                       SOCK_STREAM,  // This is a stream-oriented socket
+                       IPPROTO_TCP); // Use TCP rather than UDP
+    if (theSocket == INVALID_SOCKET)
+        return NULL;
+    static SOCKADDR_IN serverInfo;
+    serverInfo.sin_family = AF_INET;
+    serverInfo.sin_addr = *((LPIN_ADDR)*hostEntry->h_addr_list);
+    serverInfo.sin_port = htons(port);
+    static int nret;
+    nret = connect(theSocket, (LPSOCKADDR)&serverInfo, sizeof(struct sockaddr));
+    if (nret == SOCKET_ERROR) {
+        closesocket(theSocket);
+        return NULL;
+    }
+    // Reference: http://msdn.microsoft.com/en-us/library/windows/desktop/ms738573%28v=vs.85%29.aspx
+    // Set the socket I/O mode: In this case FIONBIO
+    // enables or disables the blocking mode for the
+    // socket based on the numerical value of iMode.
+    // If iMode = 0, blocking is enabled;
+    // If iMode != 0, non-blocking mode is enabled.
+    static u_long iMode;
+    iMode = 1;
+    ioctlsocket(theSocket, FIONBIO, &iMode);
+
+    static tcp_connection *connection;
+    connection = (tcp_connection *)calloc(sizeof(tcp_connection), 1);
+    connection->socket = theSocket;
+    connection->port = port;
+    connection->connected = -1;
+    connection->hostname = (uint8 *)malloc(strlen((char *)host) + 1);
+    memcpy(connection->hostname, host, strlen((char *)host) + 1);
+    return (void *)connection;
+#elif defined(QB64_UNIX)
+    struct addrinfo hints, *servinfo, *p;
+    int sockfd;
+    char str_port[6];
+    snprintf(str_port, 6, "%d", port);
+    memset(&hints, 0, sizeof(hints));
+    hints.ai_family = AF_INET;
+    hints.ai_socktype = SOCK_STREAM;
+    if (getaddrinfo((char *)host, str_port, &hints, &servinfo) != 0)
+        return NULL;
+    for (p = servinfo; p != NULL; p = p->ai_next) {
+        sockfd = socket(p->ai_family, p->ai_socktype, p->ai_protocol);
+        if (sockfd == -1)
+            continue;
+        if (connect(sockfd, p->ai_addr, p->ai_addrlen) == -1) {
+            close(sockfd);
+            continue;
+        }
+        break; // if we get here, all is good
+    }
+    freeaddrinfo(servinfo);
+    if (p == NULL)
+        return NULL;                    // indicates none of the entries succeeded
+    fcntl(sockfd, F_SETFL, O_NONBLOCK); // make socket non-blocking
+
+    // now we just need to create a struct tcp_connection to return
+    tcp_connection *connection;
+    connection = (tcp_connection *)calloc(sizeof(tcp_connection), 1);
+    connection->socket = sockfd;
+    connection->port = port;
+    connection->connected = -1;
+    connection->hostname = (uint8 *)malloc(strlen((char *)host) + 1);
+    memcpy(connection->hostname, host, strlen((char *)host) + 1);
+    return (void *)connection;
+#else
+    return NULL;
+#endif
+}
+
+void *tcp_connection_open(void *host_tcp) {
+#if !defined(DEPENDENCY_SOCKETS)
+    return NULL;
+#elif defined(QB64_WINDOWS)
+    static tcp_connection *host;
+    host = (tcp_connection *)host_tcp;
+    static sockaddr sa;
+    static int sa_size;
+    sa_size = sizeof(sa);
+    static SOCKET new_socket;
+    new_socket = accept(host->socket,
+                        &sa,       // Optionally, address of a SOCKADDR_IN struct
+                        &sa_size); //             sizeof ( struct SOCKADDR_IN )
+    if (new_socket == INVALID_SOCKET)
+        return NULL;
+    static u_long iMode;
+    iMode = 1;
+    ioctlsocket(new_socket, FIONBIO, &iMode);
+    static tcp_connection *connection;
+    connection = (tcp_connection *)calloc(sizeof(tcp_connection), 1);
+    connection->socket = new_socket;
+    // IPv4: port,port,ip,ip,ip,ip
+    connection->port = *((uint16 *)sa.sa_data);
+    connection->connected = -1;
+    *((uint32 *)(connection->ip4)) = *((uint32 *)(sa.sa_data + 2));
+    return (void *)connection;
+#elif defined(QB64_UNIX)
+    tcp_connection *host;
+    host = (tcp_connection *)host_tcp;
+    struct sockaddr remote_addr;
+    socklen_t addr_size;
+    int fd;
+
+    addr_size = sizeof(remote_addr);
+    fd = accept(host->socket, &remote_addr, &addr_size);
+    if (fd == -1)
+        return NULL;
+    fcntl(fd, F_SETFL, O_NONBLOCK); // make socket non-blocking
+
+    tcp_connection *connection;
+    connection = (tcp_connection *)calloc(sizeof(tcp_connection), 1);
+    connection->socket = fd;
+    connection->connected = -1;
+    // IPv4: port,port,ip,ip,ip,ip
+    connection->port = *((uint16 *)remote_addr.sa_data);
+    *((uint32 *)(connection->ip4)) = *((uint32 *)(remote_addr.sa_data + 2));
+    return (void *)connection;
+#else
+    return NULL:
+#endif
+}
+
+void tcp_close(void *connection) {
+    tcp_connection *tcp = (tcp_connection *)connection;
+#if !defined(DEPENDENCY_SOCKETS)
+#elif defined(QB64_WINDOWS)
+    if (tcp->socket) {
+        shutdown(tcp->socket, SD_BOTH);
+        closesocket(tcp->socket);
+    }
+#elif defined(QB64_UNIX)
+    if (tcp->socket) {
+        shutdown(tcp->socket, SHUT_RDWR);
+        close(tcp->socket);
+    }
+#endif
+    if (tcp->hostname)
+        free(tcp->hostname);
+    free(tcp);
+}
+
+void tcp_out(void *connection, void *offset, ptrszint bytes) {
+#if !defined(DEPENDENCY_SOCKETS)
+#elif defined(QB64_WINDOWS) || defined(QB64_UNIX)
+// Handle Windows which might not have this flag (it would be a no-op anyway)
+#    if !defined(MSG_NOSIGNAL)
+#        define MSG_NOSIGNAL 0
+#    endif
+    tcp_connection *tcp;
+    tcp = (tcp_connection *)connection;
+    int total = 0;         // how many bytes we've sent
+    int bytesleft = bytes; // how many we have left to send
+    int n;
+
+    while (total < bytes) {
+        n = send(tcp->socket, (char *)((char *)offset + total), bytesleft, MSG_NOSIGNAL);
+        if (n < 0) {
+            tcp->connected = 0;
+            return;
+        }
+        total += n;
+        bytesleft -= n;
+    }
+#else
+#endif
+}
+
+struct connection_struct {
+    int8 in_use;   // 0=not being used, 1=in use
+    int8 protocol; // 1=TCP/IP
+    int8 type;     // 1=client, 2=host(listening), 3=host's connection from a client
+    ptrszint stream;
+    ptrszint handle;
+    void *connection;
+    //---------------------------------
+    int32 port;
+};
+list *connection_handles = NULL;
+
+void stream_out(stream_struct *st, void *offset, ptrszint bytes) {
+    if (st->type == 1) { // Network
+        static connection_struct *co;
+        co = (connection_struct *)st->index;
+        if ((co->type == 1) || (co->type == 3)) { // client or host's connection from a client
+
+            if (co->protocol == 1) { // TCP/IP
+                tcp_out((void *)co->connection, offset, bytes);
+            }
+        } // client or host's connection from a client
+    }     // Network
+} // stream_out
+
+void stream_update(stream_struct *stream) {
+#ifdef DEPENDENCY_SOCKETS
+    // assume tcp
+
+    static connection_struct *connection;
+    connection = (connection_struct *)(stream->index);
+    static tcp_connection *tcp;
+    tcp = (tcp_connection *)(connection->connection);
+    static ptrszint bytes;
+
+    if (!stream->in_limit) {
+        stream->in = (uint8 *)malloc(1024);
+        stream->in_size = 0;
+        stream->in_limit = 1024;
+    }
+
+expand_and_retry:
+
+    // expand buffer if 'in' stream is full
+    // also guarantees that bytes requested from recv() is not 0
+    if (stream->in_size == stream->in_limit) {
+        stream->in_limit *= 2;
+        stream->in = (uint8 *)realloc(stream->in, stream->in_limit);
+    }
+
+    bytes = recv(tcp->socket, (char *)(stream->in + stream->in_size), stream->in_limit - stream->in_size, 0);
+    if (bytes < 0) { // some kind of error
+#    ifdef QB64_WINDOWS
+        if (WSAGetLastError() != WSAEWOULDBLOCK)
+            tcp->connected = 0; // fatal error
+#    else
+        if (errno != EAGAIN && errno != EWOULDBLOCK)
+            tcp->connected = 0;
+#    endif
+    } else if (bytes == 0) { // graceful shutdown occured
+        tcp->connected = 0;
+    } else {
+        stream->in_size += bytes;
+        if (stream->in_size == stream->in_limit)
+            goto expand_and_retry;
+    }
+#endif
+}
+
+void connection_close(ptrszint i) {
+    // Note: 'i' is a positive integer 1 or greater
+    //      'i' must be a valid handle
+    static special_handle_struct *sh;
+    sh = (special_handle_struct *)list_get(special_handles, i);
+
+    if (sh->type == 2) { // host listener
+        static connection_struct *cs;
+        cs = (connection_struct *)sh->index;
+        if (cs->protocol == 1)
+            tcp_close(cs->connection);
+        list_remove(connection_handles, list_get_index(connection_handles, cs));
+        list_remove(special_handles, list_get_index(special_handles, sh));
+        return;
+    } // host listener
+
+    // client or connection to host
+    if (sh->type == 1) { // stream
+        static stream_struct *ss;
+        ss = (stream_struct *)sh->index;
+        if (ss->type == 1) { // network
+            static connection_struct *cs;
+            cs = (connection_struct *)ss->index;
+            if (cs->protocol == 1)
+                tcp_close(cs->connection);
+            list_remove(connection_handles, list_get_index(connection_handles, cs));
+            stream_free(ss);
+            list_remove(special_handles, list_get_index(special_handles, sh));
+            return;
+        } // network
+    }     // stream
+}
+
+int32 connection_new(int32 method, qbs *info_in, int32 value) {
+    // method: 0=_OPENCLIENT [info=~"TCP/IP:12345:23.96.32.123], value=NULL"
+    //        1=_OPENHOST [info=~"TCP/IP:12345", value=NULL]
+    //        2=_OPENCONNECTION [info=NULL, value=host's handle]
+    // returns: -1=invalid arguments passed
+    //          0=failed to open
+    //         >0=handle of successfully opened connection
+
+    static int32 i, x;
+
+    // generic division of parts
+    static qbs *info_part[10 + 1];
+    static qbs *str;
+    static qbs *strz;
+    static qbs *info;
+
+    static int32 first_call = 1;
+    if (first_call) {
+        first_call = 0;
+        for (i = 1; i <= 10; i++) {
+            info_part[i] = qbs_new(0, 0);
+        }
+        str = qbs_new(0, 0);
+        strz = qbs_new(1, 0);
+        strz->chr[0] = 0;
+        info = qbs_new(0, 0);
+    } // first call
+
+    // split info string
+    static int32 parts;
+    parts = 0;
+    if ((method == 0) || (method == 1)) {
+        qbs_set(info, info_in);
+        qbs_set(str, qbs_new_txt(":"));
+        i = 1;
+    next_part:
+        x = func_instr(i, info, str, 1);
+        if (x) {
+            parts++;
+            qbs_set(info_part[parts], func_mid(info, i, x - i, 1));
+            i = x + 1;
+            goto next_part;
+        }
+        parts++;
+        qbs_set(info_part[parts], func_mid(info, i, NULL, NULL));
+    } // split info string
+
+    static double d;
+    static int32 port;
+
+    if ((method == 0) || (method == 1)) {
+
+        if (parts < 2)
+            return -1;
+        if (qbs_equal(qbs_ucase(info_part[1]), qbs_new_txt("TCP/IP")) == 0) {
+            if (qbs_equal(qbs_ucase(info_part[1]), qbs_new_txt("QB64IDE")) == 0 || vwatch != -1) {
+                return -1;
+            }
+        }
+
+        d = func_val(info_part[2]);
+        port = qbr_double_to_long(d); //***assume*** port number is within valid range
+
+        if (method == 0) { //_OPENCLIENT
+            if (parts != 3)
+                return -1;
+
+            static void *connection;
+            qbs_set(str, qbs_add(info_part[3], strz));
+            connection = tcp_client_open(str->chr, port);
+            if (!connection)
+                return 0;
+
+            static int32 my_handle;
+            my_handle = list_add(special_handles);
+            static special_handle_struct *my_handle_struct;
+            my_handle_struct = (special_handle_struct *)list_get(special_handles, my_handle);
+            static int32 my_stream;
+            my_stream = list_add(stream_handles);
+            static stream_struct *my_stream_struct;
+            my_stream_struct = (stream_struct *)list_get(stream_handles, my_stream);
+            static int32 my_connection;
+            my_connection = list_add(connection_handles);
+            static connection_struct *my_connection_struct;
+            my_connection_struct = (connection_struct *)list_get(connection_handles, my_connection);
+            my_handle_struct->type = 1; // stream
+            my_handle_struct->index = (ptrszint)my_stream_struct;
+            my_stream_struct->type = 1; // network
+            my_stream_struct->index = (ptrszint)my_connection_struct;
+            my_connection_struct->protocol = 1; // tcp/ip
+            my_connection_struct->type = 1;     // client
+            my_connection_struct->connection = connection;
+            my_connection_struct->port = port;
+
+            // init stream
+            my_stream_struct->in = NULL;
+            my_stream_struct->in_size = 0;
+            my_stream_struct->in_limit = 0;
+
+            if (vwatch == -1)
+                vwatch = my_handle;
+            return my_handle;
+        } // client
+
+        if (method == 1) { //_OPENHOST
+            if (parts != 2)
+                return -1;
+
+            static void *connection;
+            connection = tcp_host_open(port);
+            if (!connection)
+                return 0;
+
+            static int32 my_handle;
+            my_handle = list_add(special_handles);
+            static special_handle_struct *my_handle_struct;
+            my_handle_struct = (special_handle_struct *)list_get(special_handles, my_handle);
+            static int32 my_connection;
+            my_connection = list_add(connection_handles);
+            static connection_struct *my_connection_struct;
+            my_connection_struct = (connection_struct *)list_get(connection_handles, my_connection);
+            my_handle_struct->type = 2; // host listener
+            my_handle_struct->index = (ptrszint)my_connection_struct;
+            my_connection_struct->protocol = 1; // tcp/ip
+            my_connection_struct->type = 2;     // host(listening)
+            my_connection_struct->connection = connection;
+            my_connection_struct->port = port;
+            return my_handle;
+        }
+    } // 0 or 1
+
+    if (method == 2) { //_OPENCONNECTION
+        static special_handle_struct *sh;
+        sh = (special_handle_struct *)list_get(special_handles, value);
+        if (!sh)
+            return -1;
+        if (sh->type != 2)
+            return -1; // listening host?
+        static connection_struct *co;
+        co = (connection_struct *)sh->index;
+        static void *connection;
+        connection = tcp_connection_open(co->connection);
+        if (!connection)
+            return 0;
+
+        static int32 my_handle;
+        my_handle = list_add(special_handles);
+        static special_handle_struct *my_handle_struct;
+        my_handle_struct = (special_handle_struct *)list_get(special_handles, my_handle);
+        static int32 my_stream;
+        my_stream = list_add(stream_handles);
+        static stream_struct *my_stream_struct;
+        my_stream_struct = (stream_struct *)list_get(stream_handles, my_stream);
+        static int32 my_connection;
+        my_connection = list_add(connection_handles);
+        static connection_struct *my_connection_struct;
+        my_connection_struct = (connection_struct *)list_get(connection_handles, my_connection);
+        my_handle_struct->type = 1; // stream
+        my_handle_struct->index = (ptrszint)my_stream_struct;
+        my_stream_struct->type = 1; // network
+        my_stream_struct->index = (ptrszint)my_connection_struct;
+        my_connection_struct->protocol = 1; // tcp/ip
+        my_connection_struct->type = 3;     // host's client connection
+        my_connection_struct->connection = connection;
+        my_connection_struct->port = port;
+
+        // init stream
+        my_stream_struct->in = NULL;
+        my_stream_struct->in_size = 0;
+        my_stream_struct->in_limit = 0;
+
+        return my_handle;
+
+    } //_OPENCONNECTION
+
+} // connection_new
+
+// network prototype:
+
+int32 func__openclient(qbs *info) {
+    if (new_error)
+        return 0;
+    static int32 i;
+    i = connection_new(0, info, NULL);
+    if (i == -1) {
+        error(5);
+        return 0;
+    }
+    if (i == 0)
+        return 0;
+    return -1 - i;
+}
+
+int32 func__openhost(qbs *info) {
+    if (new_error)
+        return 0;
+    static int32 i;
+    i = connection_new(1, info, NULL);
+    if (i == -1) {
+        error(5);
+        return 0;
+    }
+    if (i == 0)
+        return 0;
+    return -1 - i;
+}
+
+int32 func__openconnection(int32 i) {
+
+    if (new_error)
+        return 0;
+    i = -(i + 1);
+    i = connection_new(2, NULL, i);
+    if (i == -1) {
+        error(258);
+        return 0;
+    } // invalid handle
+    if (i == 0)
+        return 0; // no new connections
+    return -1 - i;
+}
+
+qbs *func__connectionaddress(int32 i) {
+    static qbs *tqbs, *tqbs2, *str = NULL, *str2 = NULL;
+    static int32 x;
+    if (new_error)
+        goto error;
+    if (!str)
+        str = qbs_new(0, 0);
+    if (!str2)
+        str2 = qbs_new(0, 0);
+
+    if (i < 0) {
+        x = -(i + 1);
+        static special_handle_struct *sh;
+        sh = (special_handle_struct *)list_get(special_handles, x);
+        if (!sh) {
+            error(52);
+            goto error;
+        }
+
+        if (sh->type == 2) { // host listener
+            static connection_struct *cs;
+            cs = (connection_struct *)sh->index;
+            if (cs->protocol == 1) {                                      // TCP/IP
+                qbs_set(str, qbs_new_txt("TCP/IP:"));                     // network type
+                qbs_set(str, qbs_add(str, qbs_ltrim(qbs_str(cs->port)))); // port
+                qbs_set(str, qbs_add(str, qbs_new_txt(":")));
+                tqbs2 = WHATISMYIP();
+                if (tqbs2->len) {
+                    qbs_set(str, qbs_add(str, tqbs2));
+                } else {
+                    qbs_set(str, qbs_add(str, qbs_new_txt("127.0.0.1"))); // localhost
+                }
+                return str;
+            } // TCP/IP
+        }     // host listener
+
+        // client or connection to host
+        if (sh->type == 1) { // stream
+            static stream_struct *ss;
+            ss = (stream_struct *)sh->index;
+            if (ss->type == 1) { // network
+                static connection_struct *cs;
+                cs = (connection_struct *)ss->index;
+                if (cs->protocol == 1) {                  // TCP/IP
+                    if (cs->type == 1 || cs->type == 3) { // 1=client, 2=host(listening), 3=host's connection from a client
+
+                        static tcp_connection *tcp;
+                        tcp = (tcp_connection *)cs->connection;
+                        qbs_set(str, qbs_new_txt("TCP/IP:"));                      // network type
+                        qbs_set(str, qbs_add(str, qbs_ltrim(qbs_str(tcp->port)))); // port
+                        qbs_set(str, qbs_add(str, qbs_new_txt(":")));
+                        if (cs->type == 3) {
+                            qbs_set(str, qbs_add(str, qbs_ltrim(qbs_str(tcp->ip4[0])))); // ip
+                            qbs_set(str, qbs_add(str, qbs_new_txt(".")));
+                            qbs_set(str, qbs_add(str, qbs_ltrim(qbs_str(tcp->ip4[1])))); // ip
+                            qbs_set(str, qbs_add(str, qbs_new_txt(".")));
+                            qbs_set(str, qbs_add(str, qbs_ltrim(qbs_str(tcp->ip4[2])))); // ip
+                            qbs_set(str, qbs_add(str, qbs_new_txt(".")));
+                            qbs_set(str, qbs_add(str, qbs_ltrim(qbs_str(tcp->ip4[3])))); // ip
+                        } else {
+                            qbs_set(str, qbs_add(str, qbs_new_txt((char *)tcp->hostname)));
+                        }
+                        return str;
+                    }
+                } // TCP/IP
+            }     // network
+        }         // stream
+
+    } // i<0
+    error(52);
+    goto error;
+
+error:
+    tqbs = qbs_new(0, 1);
+    return tqbs;
+}
+
+int32 tcp_connected(void *connection) {
+    tcp_connection *tcp = (tcp_connection *)connection;
+#ifndef DEPENDENCY_SOCKETS
+    return 0;
+#else
+    return tcp->connected;
+#endif
+}
+
+int32 func__connected(int32 i) {
+    if (new_error)
+        return 0;
+    if (i < 0) {
+        static int32 x;
+        x = -(i + 1);
+        static special_handle_struct *sh;
+        sh = (special_handle_struct *)list_get(special_handles, x);
+        if (!sh)
+            goto error;
+
+        if (sh->type == 2) { // host listener
+            static connection_struct *cs;
+            cs = (connection_struct *)sh->index;
+            if (cs->protocol == 1) { // TCP/IP
+                return -1;
+            } // TCP/IP
+        }     // host listener
+
+        // client or connection to host
+        if (sh->type == 1) { // stream
+            static stream_struct *ss;
+            ss = (stream_struct *)sh->index;
+            if (ss->type == 1) { // network
+                static connection_struct *cs;
+                cs = (connection_struct *)ss->index;
+                if (cs->protocol == 1) { // TCP/IP
+                    return tcp_connected(cs->connection);
+                } // TCP/IP
+            }     // network
+        }         // stream
+
+    } // i<0
+error:
+    error(52);
+    return 0;
+}
+
+int32 func__exit() {
+    exit_blocked = 1;
+    static int32 x;
+    x = exit_value;
+    if (x)
+        exit_value = 0;
+    return x;
+}
+
+#if defined(QB64_LINUX) && defined(QB64_GUI)
+
+// X11 clipboard interface for Linux
+// SDL_SysWMinfo syswminfo;
+Atom targets, utf8string, compoundtext, clipboard;
+
+int x11filter(XEvent *x11event) {
+    static int i;
+    static char *cp;
+    static XSelectionRequestEvent *x11request;
+    static XSelectionEvent x11selectionevent;
+    static Atom mytargets[] = {XA_STRING, utf8string, compoundtext};
+    if (x11event->type == SelectionRequest) {
+        x11request = &x11event->xselectionrequest;
+        x11selectionevent.type = SelectionNotify;
+        x11selectionevent.serial = x11event->xany.send_event;
+        x11selectionevent.send_event = True;
+        x11selectionevent.display = X11_display;
+        x11selectionevent.requestor = x11request->requestor;
+        x11selectionevent.selection = x11request->selection;
+        x11selectionevent.target = None;
+        x11selectionevent.property = x11request->property;
+        x11selectionevent.time = x11request->time;
+        if (x11request->target == targets) {
+            XChangeProperty(X11_display, x11request->requestor, x11request->property, XA_ATOM, 32, PropModeReplace, (unsigned char *)mytargets, 3);
+        } else {
+            if (x11request->target == compoundtext || x11request->target == utf8string || x11request->target == XA_STRING) {
+                cp = XFetchBytes(X11_display, &i);
+                XChangeProperty(X11_display, x11request->requestor, x11request->property, x11request->target, 8, PropModeReplace, (unsigned char *)cp, i);
+                XFree(cp);
+            } else {
+                x11selectionevent.property = None;
+            }
+        }
+        XSendEvent(x11request->display, x11request->requestor, 0, NoEventMask, (XEvent *)&x11selectionevent);
+        XSync(X11_display, False);
+    }
+    return 1;
+}
+
+void setupx11clipboard() {
+    static int32 setup = 0;
+    if (!setup) {
+        setup = 1;
+        // SDL_GetWMInfo(&syswminfo);
+        // SDL_EventState(SDL_SYSWMEVENT,SDL_ENABLE);
+        // SDL_SetEventFilter(x11filter);
+        x11_lock();
+        targets = XInternAtom(X11_display, "TARGETS", False);
+        utf8string = XInternAtom(X11_display, "UTF8_STRING", False);
+        compoundtext = XInternAtom(X11_display, "COMPOUND_TEXT", False);
+        clipboard = XInternAtom(X11_display, "CLIPBOARD", False);
+        x11_unlock();
+    }
+}
+
+void x11clipboardcopy(const char *text) {
+    setupx11clipboard();
+    x11_lock();
+    XStoreBytes(X11_display, text, strlen(text) + 1);
+    XSetSelectionOwner(X11_display, clipboard, X11_window, CurrentTime);
+    x11_unlock();
+    return;
+}
+
+char *x11clipboardpaste() {
+    static int32 i;
+    static char *cp;
+    static unsigned char *cp2;
+    static Window x11selectionowner;
+    static XEvent x11event;
+    static unsigned long data_items, bytes_remaining, ignore;
+    static int format;
+    static Atom type;
+    cp = NULL;
+    cp2 = NULL;
+    setupx11clipboard();
+    // syswminfo.info.x11.lock_func();
+    x11_lock();
+    x11selectionowner = XGetSelectionOwner(X11_display, clipboard);
+    if (x11selectionowner != None) {
+        // The XGetSelectionOwner() function returns the window ID associated with the window
+        if (x11selectionowner == X11_window) { // we are the provider, so just return buffered content
+            x11_unlock();
+            int bytes;
+            cp = XFetchBytes(X11_display, &bytes);
+            return cp;
+        }
+        XConvertSelection(X11_display, clipboard, utf8string, clipboard, X11_window, CurrentTime);
+        XFlush(X11_display);
+        bool gotReply = false;
+        int timeoutMs = 10000; // 10sec
+        do {
+            XEvent event;
+            gotReply = XCheckTypedWindowEvent(X11_display, X11_window, SelectionNotify, &event);
+            if (gotReply) {
+                if (event.xselection.property == clipboard) {
+                    XGetWindowProperty(X11_display, X11_window, clipboard, 0, 0, False, AnyPropertyType, &type, &format, &data_items, &bytes_remaining, &cp2);
+                    if (cp2) {
+                        XFree(cp2);
+                        cp2 = NULL;
+                    }
+                    if (bytes_remaining) {
+                        if (XGetWindowProperty(X11_display, X11_window, clipboard, 0, bytes_remaining, False, AnyPropertyType, &type, &format, &data_items,
+                                               &ignore, &cp2) == Success) {
+                            cp = strdup((char *)cp2);
+                            XFree(cp2);
+                            XDeleteProperty(X11_display, X11_window, clipboard);
+                            x11_unlock();
+                            return cp;
+                        }
+                    }
+                    x11_unlock();
+                    return NULL;
+
+                } else {
+                    x11_unlock();
+                    return NULL;
+                }
+            }
+            Sleep(1);
+            timeoutMs -= 1;
+        } while (timeoutMs > 0);
+    } // x11selectionowner!=None
+    x11_unlock();
+    return NULL;
+}
+
+#elif defined(QB64_LINUX)
+void x11clipboardcopy(const char *text) {}
+char *x11clipboardpaste() { return NULL; }
+#endif
+
+qbs *internal_clipboard = NULL; // used only if clipboard services unavailable
+int32 linux_clipboard_init = 0;
+
+void sub__clipboard(qbs *text) {
+
+#ifdef QB64_WINDOWS
+    static uint8 *textz;
+    static HGLOBAL h;
+    if (OpenClipboard(NULL)) {
+        EmptyClipboard();
+        h = GlobalAlloc(GMEM_MOVEABLE, text->len + 1);
+        if (h) {
+            textz = (uint8 *)GlobalLock(h);
+            if (textz) {
+                memcpy(textz, text->chr, text->len);
+                textz[text->len] = 0;
+                GlobalUnlock(h);
+                SetClipboardData(CF_TEXT, h);
+            }
+        }
+        CloseClipboard();
+    }
+    return;
+#endif
+
+#ifdef QB64_MACOSX
+    PasteboardRef clipboard;
+    if (PasteboardCreate(kPasteboardClipboard, &clipboard) != noErr) {
+        return;
+    }
+    if (PasteboardClear(clipboard) != noErr) {
+        CFRelease(clipboard);
+        return;
+    }
+    CFDataRef data = CFDataCreateWithBytesNoCopy(kCFAllocatorDefault, text->chr, text->len, kCFAllocatorNull);
+    if (data == NULL) {
+        CFRelease(clipboard);
+        return;
+    }
+    OSStatus err;
+    err = PasteboardPutItemFlavor(clipboard, NULL, kUTTypeUTF8PlainText, data, 0);
+    CFRelease(clipboard);
+    CFRelease(data);
+    return;
+#endif
+
+#if defined(QB64_LINUX)
+    static qbs *textz = NULL;
+    if (!textz)
+        textz = qbs_new(0, 0);
+    qbs_set(textz, qbs_add(text, qbs_new_txt_len("\0", 1)));
+    x11clipboardcopy((char *)textz->chr);
+    return;
+#endif
+
+    if (internal_clipboard == NULL)
+        internal_clipboard = qbs_new(0, 0);
+    qbs_set(internal_clipboard, text);
+}
+
+#ifdef DEPENDENCY_SCREENIMAGE
+void sub__clipboardimage(int32 src) {
+#    ifdef QB64_WINDOWS
+
+    if (new_error)
+        return;
+
+    static int32 i, i2, ii, w, h;
+    static uint32 *o, *o2;
+    static int32 x, y, n, c, i3, c2;
+
+    // validation
+    i = src;
+    if (i >= 0) { // validate i
+        validatepage(i);
+        i = page[i];
+    } else {
+        i = -i;
+        if (i >= nextimg) {
+            error(258);
+            return;
+        }
+        if (!img[i].valid) {
+            error(258);
+            return;
+        }
+    }
+
+    if (img[i].text) {
+        error(5);
+        return;
+    }
+    // end of validation
+
+    w = img[i].width;
+    h = img[i].height;
+
+    // source[http://support.microsoft.com/kb/318876]
+    HDC hdc;
+    BITMAPV5HEADER bi;
+    HBITMAP hBitmap;
+    void *lpBits;
+    ZeroMemory(&bi, sizeof(BITMAPV5HEADER));
+    bi.bV5Size = sizeof(BITMAPV5HEADER);
+    bi.bV5Width = w;
+    bi.bV5Height = h;
+    bi.bV5Planes = 1;
+    bi.bV5BitCount = 32;
+    bi.bV5Compression = BI_RGB;
+
+    hdc = GetDC(NULL);
+    // Create the DIB section with an alpha channel.
+    hBitmap = CreateDIBSection(hdc, (BITMAPINFO *)&bi, DIB_RGB_COLORS, (void **)&lpBits, NULL, (DWORD)0);
+
+    // Transfer the source image to a new 32-bit image to avoid incompatible formats)
+    i2 = func__newimage(w, h, 32, 1);
+    sub__putimage(NULL, NULL, NULL, NULL, -i, i2, NULL, NULL, NULL, NULL, 8 + 32);
+
+    o = img[-i2].offset32;
+    o2 = (uint32 *)lpBits;
+    for (y = 0; y < h; y++) {
+        for (x = 0; x < w; x++) {
+            c = o[(h - 1 - y) * w + x];
+            o2[y * w + x] = c;
+        }
+    }
+
+    sub__freeimage(i2, 1);
+
+    // Create copy of hBitmap to send to the clipboard
+    HBITMAP bitmapCopy;
+    HDC hdc2, hdc3;
+    bitmapCopy = CreateCompatibleBitmap(hdc, w, h);
+    hdc2 = CreateCompatibleDC(hdc);
+    hdc3 = CreateCompatibleDC(hdc);
+    SelectObject(hdc2, bitmapCopy);
+    SelectObject(hdc3, hBitmap);
+    BitBlt(hdc2, 0, 0, w, h, hdc3, 0, 0, SRCCOPY);
+
+    ReleaseDC(NULL, hdc);
+    ReleaseDC(NULL, hdc2);
+    ReleaseDC(NULL, hdc3);
+
+    // Send bitmapCopy to the clipboard
+    if (OpenClipboard(NULL)) {
+        EmptyClipboard();
+        SetClipboardData(CF_BITMAP, bitmapCopy);
+        CloseClipboard();
+    }
+
+    DeleteObject(hBitmap);
+    DeleteObject(bitmapCopy);
+#    endif
+}
+#endif
+
+#ifdef DEPENDENCY_SCREENIMAGE
+int32 func__clipboardimage() {
+#    ifdef QB64_WINDOWS
+
+    if (new_error)
+        return -1;
+
+    static HBITMAP bitmap;
+    static BITMAP bitmapInfo;
+    static HDC hdc;
+    static int32 w, h;
+
+    if (OpenClipboard(NULL)) {
+        if (IsClipboardFormatAvailable(CF_BITMAP) == 0) {
+            CloseClipboard();
+            return -1;
+        }
+
+        bitmap = (HBITMAP)GetClipboardData(CF_BITMAP);
+        CloseClipboard();
+        GetObject(bitmap, sizeof(BITMAP), &bitmapInfo);
+        h = bitmapInfo.bmHeight;
+        w = bitmapInfo.bmWidth;
+
+        static BITMAPFILEHEADER bmfHeader;
+        static BITMAPINFOHEADER bi;
+        bi.biSize = sizeof(BITMAPINFOHEADER);
+        bi.biWidth = w;
+        bi.biHeight = -h;
+        bi.biPlanes = 1;
+        bi.biBitCount = 32;
+        bi.biCompression = BI_RGB;
+        bi.biSizeImage = 0;
+        bi.biXPelsPerMeter = 0;
+        bi.biYPelsPerMeter = 0;
+        bi.biClrUsed = 0;
+        bi.biClrImportant = 0;
+
+        static int32 i, i2;
+        i2 = func__dest();
+        i = func__newimage(w, h, 32, 1);
+        sub__dest(i);
+
+        hdc = GetDC(NULL);
+
+        GetDIBits(hdc, bitmap, 0, h, write_page->offset, (BITMAPINFO *)&bi, DIB_RGB_COLORS);
+        sub__setalpha(255, NULL, NULL, NULL, 0); // required as some images come
+        // with alpha 0 from the clipboard
+        sub__dest(i2);
+
+        ReleaseDC(NULL, hdc);
+        DeleteObject(bitmap);
+        return i;
+
+    } else
+        return -1;
+#    endif
+    return -1;
+}
+#endif
+
+qbs *func__clipboard() {
+#ifdef QB64_WINDOWS
+    static qbs *text;
+    static uint8 *textz;
+    static HGLOBAL h;
+    if (OpenClipboard(NULL)) {
+        if (IsClipboardFormatAvailable(CF_TEXT)) {
+            h = GetClipboardData(CF_TEXT);
+            if (h) {
+                textz = (uint8 *)GlobalLock(h);
+                if (textz) {
+                    text = qbs_new(strlen((char *)textz), 1);
+                    memcpy(text->chr, textz, text->len);
+                    GlobalUnlock(h);
+                    CloseClipboard();
+                    return text;
+                }
+            }
+        }
+        CloseClipboard();
+    }
+    text = qbs_new(0, 1);
+    return text;
+#endif
+
+#ifdef QB64_MACOSX
+    static qbs *text;
+    OSStatus err = noErr;
+    ItemCount itemCount;
+    PasteboardSyncFlags syncFlags;
+    static PasteboardRef inPasteboard = NULL;
+    PasteboardCreate(kPasteboardClipboard, &inPasteboard);
+    char *data;
+    data = "";
+    syncFlags = PasteboardSynchronize(inPasteboard);
+    err = badPasteboardSyncErr;
+
+    err = PasteboardGetItemCount(inPasteboard, &itemCount);
+    if ((err) != noErr)
+        goto CantGetPasteboardItemCount;
+
+    for (int itemIndex = 1; itemIndex <= itemCount; itemIndex++) {
+        PasteboardItemID itemID;
+        CFDataRef flavorData;
+
+        err = PasteboardGetItemIdentifier(inPasteboard, itemIndex, &itemID);
+        if ((err) != noErr)
+            goto CantGetPasteboardItemIdentifier;
+
+        err = PasteboardCopyItemFlavorData(inPasteboard, itemID, CFSTR("public.utf8-plain-text"), &flavorData);
+        if ((err) != noErr)
+            goto CantGetPasteboardItemCount;
+        data = (char *)CFDataGetBytePtr(flavorData);
+
+        uint32 size;
+        size = CFDataGetLength(flavorData);
+
+        text = qbs_new(size, 1);
+        memcpy(text->chr, data, text->len);
+        // CFRelease (flavorData);
+        // CFRelease (flavorTypeArray);
+        // CFRelease(inPasteboard);
+        return text;
+
+    CantGetPasteboardItemIdentifier:;
+    }
+
+CantGetPasteboardItemCount:
+    text = qbs_new(0, 1);
+    return text;
+    return NULL;
+#endif
+
+#if defined(QB64_LINUX)
+    qbs *text;
+    char *cp = x11clipboardpaste();
+    cp = x11clipboardpaste();
+    if (!cp) {
+        text = qbs_new(0, 1);
+    } else {
+        text = qbs_new(strlen(cp), 1);
+        memcpy(text->chr, cp, text->len);
+        free(cp);
+    }
+    return text;
+#endif
+
+    if (internal_clipboard == NULL)
+        internal_clipboard = qbs_new(0, 0);
+    return internal_clipboard;
+}
+
+int32 display_called = 0;
+void display_now() {
+    if (autodisplay) {
+        display_called = 0;
+        while (!display_called)
+            Sleep(1);
+    } else {
+        display();
+    }
+}
+
+void sub__fullscreen(int32 method, int32 passed) {
+    // ref: "[{_OFF|_STRETCH|_SQUAREPIXELS|OFF}][, _SMOOTH]"
+    //          1      2           3        4         1
+    int32 x;
+    if (method == 0)
+        x = 1;
+    if (method == 1 || method == 4)
+        x = 0;
+    if (method == 2)
+        x = 1;
+    if (method == 3)
+        x = 2;
+    if (passed & 1)
+        fullscreen_smooth = 1;
+    else
+        fullscreen_smooth = 0;
+    if (full_screen != x)
+        full_screen_set = x;
+    force_display_update = 1;
+}
+
+void sub__allowfullscreen(int32 method, int32 smooth) {
+    // ref: "[{_STRETCH|_SQUAREPIXELS|_OFF|_ALL|OFF}][, _SMOOTH|_OFF|_ALL|OFF]"
+    //            1          2         3    4   5         1      2    3   4
+
+    fullscreen_allowedmode = method;
+    if (method == 3 || method == 5)
+        fullscreen_allowedmode = -1;
+    if (method == 4 || method == NULL)
+        fullscreen_allowedmode = 0;
+
+    fullscreen_allowedsmooth = smooth;
+    if (smooth == 2 || smooth == 4)
+        fullscreen_allowedsmooth = -1;
+    if (smooth == 3 || smooth == NULL)
+        fullscreen_allowedsmooth = 0;
+}
+
+int32 func__fullscreen() {
+    static int32 x;
+    x = full_screen_set;
+    if (x != -1)
+        return x;
+    return full_screen;
+}
+
+int32 func__fullscreensmooth() { return -fullscreen_smooth; }
+
+void chain_restorescreenstate(int32 i) {
+    static int32 i32, i32b, i32c, x, x2;
+    generic_get(i, -1, (uint8 *)&i32, 4);
+
+    if (i32 == 256) {
+        generic_get(i, -1, (uint8 *)&i32, 4);
+        if (i32 != 0)
+            qbg_screen(i32, 0, 0, 0, 0, 1);
+        generic_get(i, -1, (uint8 *)&i32, 4);
+        if (i32 == 258) {
+            generic_get(i, -1, (uint8 *)&i32, 4);
+            i32b = i32;
+            generic_get(i, -1, (uint8 *)&i32, 4);
+            qbsub_width(0, i32b, i32, 0, 0, 1 + 2);
+            generic_get(i, -1, (uint8 *)&i32, 4);
+        }
+    }
+
+    if (i32 == 257) {
+        generic_get(i, -1, (uint8 *)&i32, 4);
+        i32c = i32;
+        generic_get(i, -1, (uint8 *)&i32, 4);
+        i32b = i32;
+        generic_get(i, -1, (uint8 *)&i32, 4);
+        qbg_screen(func__newimage(i32b, i32, i32c, 1), 0, 0, 0, 0, 1);
+        generic_get(i, -1, (uint8 *)&i32, 4);
+    }
+
+    if (i32 == 259) {
+        generic_get(i, -1, (uint8 *)&i32, 4);
+        sub__font(i32, 0, 0);
+        generic_get(i, -1, (uint8 *)&i32, 4);
+    }
+
+    static img_struct *ix;
+    static img_struct imgs;
+
+    while (i32 == 260) {
+        generic_get(i, -1, (uint8 *)&i32, 4);
+        x = i32;
+        qbg_screen(0, 0, x, 0, 0, 4 + 8); // switch to page (allocates the page)
+        ix = &img[page[x]];
+        generic_get(i, -1, ix->offset, ix->width * ix->height * ix->bytes_per_pixel);
+        imgs = *ix;
+        generic_get(i, -1, (uint8 *)ix, sizeof(img_struct));
+        // revert specific data
+        if (ix->font >= 32)
+            ix->font = imgs.font;
+        ix->offset = imgs.offset;
+        ix->pal = imgs.pal;
+        generic_get(i, -1, (uint8 *)&i32, 4);
+    }
+
+    if (i32 == 261) {
+        generic_get(i, -1, (uint8 *)&i32, 4);
+        i32b = i32;
+        generic_get(i, -1, (uint8 *)&i32, 4);
+        qbg_screen(0, 0, i32b, i32, 0, 4 + 8); // switch to correct active & visual pages
+        generic_get(i, -1, (uint8 *)&i32, 4);
+    }
+
+    if (i32 == 262) {
+        for (x = 0; x <= 255; x++) {
+            generic_get(i, -1, (uint8 *)&i32, 4);
+            sub__palettecolor(x, i32, 0, 1);
+        }
+        generic_get(i, -1, (uint8 *)&i32, 4);
+    }
+
+    // assume command #511("finished screen state") in i32
+}
+
+void chain_savescreenstate(int32 i) { // adds the screen state to file #i
+    static int32 i32, x, x2;
+    static img_struct *i0, *ix;
+    i0 = &img[page[0]];
+
+    if ((i0->offset > cmem) && (i0->offset < (cmem + 1114099))) { // cmem?[need to maintain cmem state]
+        //[256][mode]
+        i32 = 256;
+        generic_put(i, -1, (uint8 *)&i32, 4);
+        i32 = i0->compatible_mode;
+        generic_put(i, -1, (uint8 *)&i32, 4);
+        if (i0->text) {
+            //[258][WIDTH:X][Y]
+            i32 = 258;
+            generic_put(i, -1, (uint8 *)&i32, 4);
+            i32 = i0->width;
+            generic_put(i, -1, (uint8 *)&i32, 4);
+            i32 = i0->height;
+            generic_put(i, -1, (uint8 *)&i32, 4);
+        }
+    } else {
+        //[257][mode][X][Y]
+        i32 = 257;
+        generic_put(i, -1, (uint8 *)&i32, 4);
+        i32 = i0->compatible_mode;
+        generic_put(i, -1, (uint8 *)&i32, 4);
+        i32 = i0->width;
+        generic_put(i, -1, (uint8 *)&i32, 4);
+        i32 = i0->height;
+        generic_put(i, -1, (uint8 *)&i32, 4);
+    }
+    //[259][font] (standard fonts only)
+    if (i0->font < 32) {
+        i32 = 259;
+        generic_put(i, -1, (uint8 *)&i32, 4);
+        i32 = i0->font;
+        generic_put(i, -1, (uint8 *)&i32, 4);
+    }
+
+    //[260][page][rawdata]
+    // note: write page is done last to avoid having its values undone by the later page switch
+    x2 = -1;
+    for (x = 0; x < pages; x++) {
+        if (page[x]) {
+            if (page[x] != write_page_index) {
+            save_write_page:
+                ix = &img[page[x]];
+                i32 = 260;
+                generic_put(i, -1, (uint8 *)&i32, 4);
+                i32 = x;
+                generic_put(i, -1, (uint8 *)&i32, 4);
+                generic_put(i, -1, ix->offset, ix->width * ix->height * ix->bytes_per_pixel);
+                // save structure (specific parts will be reincorporated)
+                generic_put(i, -1, (uint8 *)ix, sizeof(img_struct));
+                if (x == x2)
+                    break;
+            } else
+                x2 = x;
+        }
+    }
+    if ((x2 != -1) && (x != x2)) {
+        x = x2;
+        goto save_write_page;
+    }
+
+    //[261][activepage][visualpage]
+    i32 = 261;
+    generic_put(i, -1, (uint8 *)&i32, 4);
+    i32 = 0; // note: activepage could be a non-screenpage
+    for (x = 0; x < pages; x++) {
+        if (page[x] == write_page_index) {
+            i32 = x;
+            break;
+        }
+    }
+    generic_put(i, -1, (uint8 *)&i32, 4);
+    i32 = 0;
+    for (x = 0; x < pages; x++) {
+        if (page[x] == display_page_index) {
+            i32 = x;
+            break;
+        }
+    }
+    generic_put(i, -1, (uint8 *)&i32, 4);
+
+    //[262][256x32-bit color palette]
+    if (i0->bytes_per_pixel != 4) {
+        i32 = 262;
+        generic_put(i, -1, (uint8 *)&i32, 4);
+        for (x = 0; x <= 255; x++) {
+            i32 = func__palettecolor(x, 0, 1);
+            generic_put(i, -1, (uint8 *)&i32, 4);
+        }
+    }
+
+    //[511](screen state finished)
+    i32 = 511;
+    generic_put(i, -1, (uint8 *)&i32, 4);
+
+} // chain_savescreenstate
+
+int32 gfs_new() {
+    static int32 i;
+    if (gfs_freed_n) {
+        i = gfs_freed[--gfs_freed_n];
+    } else {
+        i = gfs_n;
+        gfs_n++;
+        gfs_file = (gfs_file_struct *)realloc(gfs_file, gfs_n * sizeof(gfs_file_struct));
+#ifdef GFS_WINDOWS
+        gfs_file_win = (gfs_file_win_struct *)realloc(gfs_file_win, gfs_n * sizeof(gfs_file_win_struct));
+#endif
+    }
+    memset(&gfs_file[i], 0, sizeof(gfs_file_struct));
+#ifdef GFS_WINDOWS
+    ZeroMemory(&gfs_file_win[i], sizeof(gfs_file_win_struct));
+#endif
+    gfs_file[i].id = gfs_nextid++;
+    return i;
+}
+
+int32 gfs_validhandle(int32 i) {
+    if ((i < 0) || (i >= gfs_n))
+        return 0;
+    if (gfs_file[i].scrn)
+        return 1;
+    if (gfs_file[i].open)
+        return 1;
+    return 0;
+}
+
+int32 gfs_fileno_valid(int32 f) {
+    // returns: -2   invalid handle
+    //          1   in use
+    //          0   unused
+
+    if (f <= 0)
+        return -2;
+    if (f <= gfs_fileno_n) {
+        if (gfs_fileno[f] == -1)
+            return 0;
+        else
+            return 1;
+    }
+    gfs_fileno = (int32 *)realloc(gfs_fileno, (f + 1) * 4);
+    memset(gfs_fileno + gfs_fileno_n + 1, -1, (f - gfs_fileno_n) * 4);
+    gfs_fileno_n = f;
+    return 0;
+}
+
+int32 gfs_fileno_freefile() { // like FREEFILE
+    // note: for QBASIC compatibility the lowest available file number is returned
+    static int32 x;
+    for (x = 1; x <= gfs_fileno_n; x++)
+        if (gfs_fileno[x] == -1)
+            return x;
+    return gfs_fileno_n + 1;
+}
+
+void gfs_fileno_use(int32 f, int32 i) {
+    // assumes valid handles
+    gfs_fileno[f] = i;
+    gfs_file[i].fileno = f;
+}
+
+void gfs_fileno_free(int32 f) { // note: called by gfs_free (DO NOT CALL THIS FUNCTION)
+    gfs_fileno[f] = -1;
+}
+
+int32 gfs_free(int32 i) {
+
+    if (!gfs_validhandle(i))
+        return -2; // invalid handle
+    if (gfs_freed_size <= gfs_freed_n) {
+        gfs_freed_size++;
+        gfs_freed = (int32 *)realloc(gfs_freed, gfs_freed_size * 4);
+    }
+
+    gfs_file[i].open = 0;
+    if (gfs_file[i].fileno)
+        gfs_fileno_free(gfs_file[i].fileno);
+    gfs_freed[gfs_freed_n++] = i;
+    return 0;
+}
+
+int32 gfs_close(int32 i) {
+    static int32 x;
+    if (x = gfs_free(i))
+        return x;
+
+    if (gfs_file[i].scrn)
+        return 0; // No further action needed
+    if (gfs_file[i].field_buffer) {
+        free(gfs_file[i].field_buffer);
+        gfs_file[i].field_buffer = NULL;
+    }
+    if (gfs_file[i].field_strings) {
+        free(gfs_file[i].field_strings);
+        gfs_file[i].field_strings = NULL;
+    }
+
+#ifdef GFS_C
+    static gfs_file_struct *f;
+    f = &gfs_file[i];
+    f->file_handle->close();
+    delete f->file_handle;
+    return 0;
+#endif
+
+#ifdef GFS_WINDOWS
+    static gfs_file_win_struct *f_w;
+    f_w = &gfs_file_win[i];
+    CloseHandle(f_w->file_handle);
+    return 0;
+#endif
+
+    return -1;
+}
+
+int64 gfs_lof(int32 i) {
+    if (!gfs_validhandle(i))
+        return -2; // invalid handle
+    static gfs_file_struct *f;
+    f = &gfs_file[i];
+    if (f->scrn)
+        return -4;
+#ifdef GFS_C
+    f->file_handle->clear();
+    if (f->read) {
+        static int64 bytes;
+        f->file_handle->seekg(0, ios::end);
+        bytes = f->file_handle->tellg();
+        f->file_handle->seekg(f->pos);
+        return bytes;
+    }
+    if (f->write) {
+        static int64 bytes;
+        f->file_handle->seekp(0, ios::end);
+        bytes = f->file_handle->tellp();
+        f->file_handle->seekp(f->pos);
+        return bytes;
+    }
+    return -1;
+#endif
+
+#ifdef GFS_WINDOWS
+    static gfs_file_win_struct *f_w;
+    f_w = &gfs_file_win[i];
+    static int64 bytes;
+    *((int32 *)&bytes) = GetFileSize(f_w->file_handle, (DWORD *)(((int32 *)&bytes) + 1));
+    if ((bytes & 0xFFFFFFFF) == 0xFFFFFFFF) {
+        if (GetLastError() != NO_ERROR)
+            return -3; // bad/incorrect file mode
+    }
+    return bytes;
+#endif
+
+    return -1;
+}
+
+int32 gfs_open_com_syntax(qbs *fstr, gfs_file_struct *f) {
+    // 0=not an open com statement
+    //-1=syntax error
+    // 1=valid
+    // check if filename is a COM open command
+    static int32 x, i;
+    static int32 v, c, z;
+    f->com_port = 0;
+    if (fstr->len <= 3)
+        return 0;
+    if ((fstr->chr[0] & 223) != 67)
+        return 0; //"C"/"c"
+    if ((fstr->chr[1] & 223) != 79)
+        return 0; //"O"/"o"
+    if ((fstr->chr[2] & 223) != 77)
+        return 0; //"M"/"m"
+    v = -1;
+    for (i = 3; i < fstr->len - 1; i++) {
+        c = fstr->chr[i];
+        if (c == 58)
+            goto comstatment;
+        if ((c < 48) || (c > 57))
+            return 0; // not 0-9
+        if (v == -1) {
+            if (c == 48)
+                return 0; // first digit 0
+            v = 0;
+        }
+        v = v * 10 + (c - 48);
+    }
+    return 0; // no ":"
+comstatment:
+    if ((x >= 7) || (v <= 0) || (v > 255))
+        return -1; // invalid port number (1-255)
+    f->com_port = v;
+
+    // COM open confirmed
+    static qbs *str = NULL;
+    if (!str)
+        str = qbs_new(0, 0);
+    qbs_set(str, qbs_ucase(fstr));
+    str->len--; // remove null term.
+
+    // set option values to uninitialized
+    //---group 1
+    f->com_baud_rate = -1;
+    f->com_parity = -1;
+    f->com_data_bits_per_byte = -1;
+    f->com_stop_bits = -1;
+    //---group 2
+    f->com_rs = -1;
+    f->com_bin_asc = -1;
+    f->com_asc_lf = -1;
+    f->com_cd_x = -1;
+    f->com_cs_x = -1;
+    f->com_ds_x = -1;
+    f->com_op_x = -1;
+
+    static int32 str_or_num;
+    static int64 strv;
+    static int32 stage;
+    static int32 com_rb_used, com_tb_used;
+    com_rb_used = 0;
+    com_tb_used = 0;
+    stage = 1;
+    str_or_num = 1;
+    strv = 0;
+    v = -1;
+    for (i = i + 1; i < str->len; i++) {
+        c = str->chr[i];
+        if (c != 44) {
+            if ((c < 48) || ((c > 57) && (c < 65)) || (c > 90))
+                return -1; // invalid character
+            if ((str_or_num == 2) && (c >= 65))
+                return -1; // invalid character
+            if (c < 65)
+                str_or_num = 2;                      // ABC->123
+            if ((str_or_num == 1) || (stage == 4)) { // note: stage 4 is interpreted as a string
+                if (strv & 0xFF0000)
+                    strv = strv | (c << 24);
+                else if (strv & 0x00FF00)
+                    strv = strv | (c << 16);
+                else if (strv & 0x0000FF)
+                    strv = strv | (c << 8);
+                else
+                    strv = strv = c;
+                if (strv > 16777216)
+                    return -1; // string option too long (max 3 characters)
+            } else {
+                if ((c > 48) && (c <= 57)) {
+                    if (v == -2)
+                        return -1; // leading 0s are invalid
+                    if (v == -1)
+                        v = 0;
+                    v = v * 10 + (c - 48);
+                } else { // 0
+                    if (v == -2)
+                        return -1; // leading 0s are invalid
+                    if (v == -1)
+                        v = -2; // 0...
+                    if (v > 0)
+                        v = v * 10;
+                }
+                if (v > 2147483647)
+                    return -1; // numeric value too large (LONG values only)
+            }
+        } // c!=44
+        if ((c == 44) || (i == str->len - 1)) {
+            if (v == -2)
+                v = 0;
+            // note: v==-1 means omit
+            if (stage == 1) {
+                if (f->com_baud_rate != -1)
+                    return -1;
+                if (strv)
+                    return -1;
+                if (v == 0)
+                    return -1;
+                if (v == -1)
+                    v = 300;
+                f->com_baud_rate = v;
+                stage++;
+                goto done_stage;
+            }
+            if (stage == 2) {
+                if (f->com_parity != -1)
+                    return -1;
+                if (v != -1)
+                    return -1;
+                x = -1;
+                if (strv == 78)
+                    x = 0; // N
+                if (strv == 0)
+                    x = 1; // E*
+                if (strv == 69)
+                    x = 1; // E
+                if (strv == 79)
+                    x = 2; // O
+                if (strv == 83)
+                    x = 3; // S
+                if (strv == 77)
+                    x = 4; // M
+                if (strv == 17744)
+                    x = 5; // PE
+                if (x == -1)
+                    return -1;
+                f->com_parity = x;
+                stage++;
+                goto done_stage;
+            }
+            if (stage == 3) {
+                if (f->com_data_bits_per_byte != -1)
+                    return -1;
+                if (strv)
+                    return -1;
+                x = -1;
+                if (v == -1)
+                    x = 7;
+                if (v == 5)
+                    x = 5;
+                if (v == 6)
+                    x = 6;
+                if (v == 7)
+                    x = 7;
+                if (v == 8)
+                    x = 8;
+                if (x == -1)
+                    return -1;
+                f->com_data_bits_per_byte = x;
+                stage++;
+                goto done_stage;
+            }
+            if (stage == 4) {
+                if (f->com_stop_bits != -1)
+                    return -1;
+                if (v != -1)
+                    return -1;
+                x = -1;
+                if (strv == 0) {
+                    x = 10;
+                    if (f->com_baud_rate <= 110) {
+                        x = 20;
+                        if (f->com_data_bits_per_byte == 5)
+                            x = 15;
+                    }
+                } // 0
+                if (strv == 49)
+                    x = 10; //"1"
+                if (strv == 3485233)
+                    x = 15; //"1.5"
+                if (strv == 50)
+                    x = 20; //"2"
+                if (x == -1)
+                    return -1;
+                f->com_stop_bits = x;
+                stage++;
+                goto done_stage;
+            }
+            // stage>4
+            if (!strv)
+                return -1; // all options after 4 require a string
+            if (strv == 21330) {
+                if (f->com_rs != -1)
+                    return -1; // RS
+                f->com_rs = 1;
+                goto done_stage;
+            }
+            if (strv == 5130562) {
+                if (f->com_bin_asc != -1)
+                    return -1; // BIN
+                f->com_bin_asc = 0;
+                goto done_stage;
+            }
+            if (strv == 4412225) {
+                if (f->com_bin_asc != -1)
+                    return -1; // ASC
+                f->com_bin_asc = 1;
+                goto done_stage;
+            }
+            if (strv == 16980) {
+                if (com_tb_used)
+                    return -1; // TB
+                com_tb_used = 1;
+                goto done_stage;
+            }
+            if (strv == 16978) {
+                if (com_rb_used)
+                    return -1; // RB
+                com_rb_used = 1;
+                goto done_stage;
+            }
+            if (strv == 17996) {
+                if (f->com_asc_lf != -1)
+                    return -1; // LF
+                f->com_asc_lf = 1;
+                goto done_stage;
+            }
+            if (strv == 17475) {
+                if (f->com_cd_x != -1)
+                    return -1; // CD
+                if (v == -1)
+                    v = 0;
+                if (v > 65535)
+                    return -1;
+                f->com_cd_x = v;
+                goto done_stage;
+            }
+            if (strv == 21315) {
+                if (f->com_cs_x != -1)
+                    return -1; // CS
+                if (v == -1)
+                    v = 1000;
+                if (v > 65535)
+                    return -1;
+                f->com_cs_x = v;
+                goto done_stage;
+            }
+            if (strv == 21316) {
+                if (f->com_ds_x != -1)
+                    return -1; // DS
+                if (v == -1)
+                    v = 1000;
+                if (v > 65535)
+                    return -1;
+                f->com_ds_x = v;
+                goto done_stage;
+            }
+            if (strv == 20559) {
+                if (f->com_op_x != -1)
+                    return -1; // OP
+                if (v == -1)
+                    v = 10000;
+                if (v > 65535)
+                    return -1;
+                f->com_op_x = v;
+                goto done_stage;
+            }
+            return -1; // invalid option
+        done_stage:
+            str_or_num = 1;
+            strv = 0;
+            v = -1;
+        }
+    } // i
+
+    // complete omitted options with defaults
+    if (f->com_baud_rate == -1)
+        f->com_baud_rate = 300;
+    if (f->com_parity == -1)
+        f->com_parity = 1;
+    if (f->com_data_bits_per_byte == -1)
+        f->com_data_bits_per_byte = 7;
+    if (f->com_stop_bits == -1) {
+        x = 10;
+        if (f->com_baud_rate <= 110) {
+            x = 20;
+            if (f->com_data_bits_per_byte == 5)
+                x = 15;
+        }
+        f->com_stop_bits = x;
+    }
+    if (f->com_bin_asc == -1)
+        f->com_bin_asc = 0;
+    if (f->com_asc_lf == -1)
+        f->com_asc_lf = 0;
+    if (f->com_asc_lf == 1) {
+        if (f->com_bin_asc == 0)
+            f->com_asc_lf = 0;
+    }
+    if (f->com_rs == -1)
+        f->com_rs = 0;
+    if (f->com_cd_x == -1)
+        f->com_cd_x = 0;
+    if (f->com_cs_x == -1)
+        f->com_cs_x = 1000;
+    if (f->com_ds_x == -1)
+        f->com_ds_x = 1000;
+    if (f->com_op_x == -1) {
+        x = f->com_cd_x * 10;
+        z = f->com_ds_x * 10;
+        if (z > x)
+            x = z;
+        if (x > 65535)
+            x = 65535;
+        f->com_op_x = x;
+    }
+}
+
+int32 gfs_open(qbs *filename, int32 access, int32 restrictions, int32 how) {
+    // filename - an OS compatible filename (doesn't need to be NULL terminated)
+    // access - 1=read, 2=write, 3=read and write
+    // restrictions - 1=others cannot read, 2=others cannot write, 3=others cannot read or write(exclusive access)
+    // how - 1=create(if it doesn't exist), 2=create(if it doesn't exist) & truncate
+    //      3=create(if it doesn't exist)+undefined access[get whatever access is available]
+    static int32 i, x, x2, x3, e;
+    static qbs *filenamez = NULL;
+    static gfs_file_struct *f;
+
+    if (!filenamez)
+        filenamez = qbs_new(0, 0);
+    qbs_set(filenamez, qbs_add(filename, qbs_new_txt_len("\0", 1)));
+
+    i = gfs_new();
+    f = &gfs_file[i];
+
+    int32 v1;
+    unsigned char *c1 = filename->chr;
+    v1 = *c1;
+    if (v1 == 83 || v1 == 115) { // S
+        c1++;
+        v1 = *c1;
+        if (v1 == 67 || v1 == 99) { // C
+            c1++;
+            v1 = *c1;
+            if (v1 == 82 || v1 == 114) { // R
+                c1++;
+                v1 = *c1;
+                if (v1 == 78 || v1 == 110) { // N
+                    c1++;
+                    v1 = *c1;
+                    if (v1 == 58) { //:
+                        f->scrn = 1;
+                        return i;
+                    };
+                };
+            };
+        };
+    };
+
+    if (access & 1)
+        f->read = 1;
+    if (access & 2)
+        f->write = 1;
+    if (restrictions & 1)
+        f->lock_read = 1;
+    if (restrictions & 2)
+        f->lock_write = 1;
+    f->pos = 0;
+
+    // check for OPEN COM syntax
+    if (x = gfs_open_com_syntax(filenamez, f)) {
+        if (x == -1) {
+            gfs_free(i);
+            return -11;
+        } //-11 bad file name
+        // note: each GFS implementation will handle COM communication differently
+    }
+
+#ifdef GFS_C
+    // note: GFS_C ignores restrictions/locking
+    f->file_handle = new fstream();
+    // attempt as if it exists:
+    if (how == 2) {
+        // with truncate
+        if (access == 1)
+            f->file_handle->open(fixdir(filenamez), ios::in | ios::binary | ios::trunc);
+        if (access == 2)
+            f->file_handle->open(fixdir(filenamez), ios::out | ios::binary | ios::trunc);
+        if (access == 3)
+            f->file_handle->open(fixdir(filenamez), ios::in | ios::out | ios::binary | ios::trunc);
+    } else {
+        // without truncate
+        if (access == 1)
+            f->file_handle->open(fixdir(filenamez), ios::in | ios::binary);
+        if (access == 2)
+            f->file_handle->open(fixdir(filenamez), ios::out | ios::binary | ios::app);
+        if (access == 3)
+            f->file_handle->open(fixdir(filenamez), ios::in | ios::out | ios::binary);
+    }
+    if (how) {
+        if (!f->file_handle->is_open()) { // couldn't open file, so attempt creation
+            f->file_handle_o = new ofstream();
+            f->file_handle_o->open(fixdir(filenamez), ios::out);
+            if (f->file_handle_o->is_open()) { // created new file
+                f->file_handle_o->close();
+                // retry open
+                f->file_handle->clear();
+                if (how == 2) {
+                    // with truncate
+                    if (access == 1)
+                        f->file_handle->open(fixdir(filenamez), ios::in | ios::binary | ios::trunc);
+                    if (access == 2)
+                        f->file_handle->open(fixdir(filenamez), ios::out | ios::binary | ios::trunc);
+                    if (access == 3)
+                        f->file_handle->open(fixdir(filenamez), ios::in | ios::out | ios::binary | ios::trunc);
+                } else {
+                    // without truncate
+                    if (access == 1)
+                        f->file_handle->open(fixdir(filenamez), ios::in | ios::binary);
+                    if (access == 2)
+                        f->file_handle->open(fixdir(filenamez), ios::out | ios::binary | ios::app);
+                    if (access == 3)
+                        f->file_handle->open(fixdir(filenamez), ios::in | ios::out | ios::binary);
+                }
+            }
+            delete f->file_handle_o;
+        }
+    }                                 // how
+    if (!f->file_handle->is_open()) { // couldn't open file
+        delete f->file_handle;
+        gfs_free(i);
+        if (how)
+            return -11; // Bad file name
+        return -5;      // File not found
+    }
+    // file opened successfully
+    f->open = 1;
+    return i;
+#endif
+
+#ifdef GFS_WINDOWS
+    static gfs_file_win_struct *f_w;
+    f_w = &gfs_file_win[i];
+    x = 0;
+    if (access & 1)
+        x |= GENERIC_READ;
+    if (access & 2)
+        x |= GENERIC_WRITE;
+    x2 = FILE_SHARE_READ | FILE_SHARE_WRITE;
+    if (restrictions & 1)
+        x2 ^= FILE_SHARE_READ;
+    if (restrictions & 2)
+        x2 ^= FILE_SHARE_WRITE;
+
+    if (f->com_port) { // open a com port
+        static qbs *portname = NULL;
+        if (!portname)
+            portname = qbs_new(0, 0);
+        qbs_set(portname, qbs_add(qbs_new_txt("CO"), qbs_str(f->com_port)));
+        qbs_set(portname, qbs_add(portname, qbs_new_txt_len(":\0", 2)));
+        portname->chr[2] = 77; // replace " " with "M"
+        f_w->file_handle = CreateFile((char *)portname->chr, x, 0, NULL, OPEN_EXISTING, 0, NULL);
+        if (f_w->file_handle == INVALID_HANDLE_VALUE) {
+            gfs_free(i);
+            return -8;
+        } // device unavailable
+        static DCB cs;
+        ZeroMemory(&cs, sizeof(DCB));
+        cs.DCBlength = sizeof(DCB);
+        if (!GetCommState(f_w->file_handle, &cs)) {
+            CloseHandle(f_w->file_handle);
+            gfs_free(i);
+            return -8;
+        } // device unavailable
+        static COMMTIMEOUTS ct;
+        ZeroMemory(&ct, sizeof(COMMTIMEOUTS));
+        /*dump port state and return "file not found" (used for debugging only)
+            if (!GetCommTimeouts(f_w->file_handle,&ct)){CloseHandle(f_w->file_handle); gfs_free(i); return -8;}//device unavailable
+            ofstream mydump("f:\\comdump.bin");
+            mydump.write((char*)&cs,sizeof(cs));
+            mydump.write((char*)&ct,sizeof(ct));
+            mydump.close();
+            CloseHandle(f_w->file_handle); gfs_free(i);
+            return -4;
+        */
+        cs.BaudRate = f->com_baud_rate;
+        x = f->com_stop_bits;
+        if (x == 10)
+            x2 = 0;
+        if (x == 15)
+            x2 = 1;
+        if (x == 20)
+            x2 = 2;
+        cs.StopBits = x2;
+        cs.ByteSize = f->com_data_bits_per_byte;
+        x = f->com_parity;
+        if (x == 0)
+            x2 = 0;
+        if (x == 1)
+            x2 = 2;
+        if (x == 2)
+            x2 = 1;
+        if (x == 3)
+            x2 = 4;
+        if (x == 4)
+            x2 = 3;
+        // if (x==5) x2=... ***"PE" will be supported later***
+        // 0-4=None,Odd,Even,Mark,Space
+        cs.Parity = x2;
+        if (x2 == 0)
+            cs.fParity = 0;
+        else
+            cs.fParity = 1;
+        if (f->com_rs)
+            cs.fRtsControl = RTS_CONTROL_DISABLE;
+        if (f->com_bin_asc == 0)
+            cs.fBinary = 1;
+        else
+            cs.fBinary = 0;
+        cs.EofChar = 26;
+        if (!SetCommState(f_w->file_handle, &cs)) {
+            CloseHandle(f_w->file_handle);
+            gfs_free(i);
+            return -8;
+        } // device unavailable
+        if (f->com_ds_x == 0) {
+            // A value of MAXDWORD, combined with zero values for both the ReadTotalTimeoutConstant and ReadTotalTimeoutMultiplier members, specifies that the
+            // read operation is to return immediately with the characters that have already been received, even if no characters have been received.
+            ct.ReadIntervalTimeout = MAXDWORD;
+            ct.ReadTotalTimeoutMultiplier = 0;
+            ct.ReadTotalTimeoutConstant = 0;
+        } else {
+            ct.ReadIntervalTimeout = 0;
+            ct.ReadTotalTimeoutMultiplier = 0;
+            ct.ReadTotalTimeoutConstant = f->com_ds_x;
+        }
+        ct.WriteTotalTimeoutMultiplier = 0;
+        ct.WriteTotalTimeoutConstant = f->com_cs_x;
+        if (!SetCommTimeouts(f_w->file_handle, &ct)) {
+            CloseHandle(f_w->file_handle);
+            gfs_free(i);
+            return -8;
+        } // device unavailable
+        f->open = 1;
+        return i;
+    }
+
+    /*
+        #define CREATE_NEW          1
+        #define CREATE_ALWAYS       2
+        #define OPEN_EXISTING       3
+        #define OPEN_ALWAYS         4
+        #define TRUNCATE_EXISTING   5
+    */
+    x3 = OPEN_EXISTING;
+    if (how)
+        x3 = OPEN_ALWAYS;
+undefined_retry:
+    f_w->file_handle = CreateFile(fixdir(filenamez), x, x2, NULL, x3, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (f_w->file_handle == INVALID_HANDLE_VALUE) {
+
+        if (how == 3) {
+            // attempt read access only
+            x = GENERIC_READ;
+            f->read = 1;
+            f->write = 0;
+            how++;
+            goto undefined_retry;
+        }
+
+        if (how == 4) {
+            // attempt write access only
+            x = GENERIC_WRITE;
+            f->read = 0;
+            f->write = 1;
+            how++;
+            goto undefined_retry;
+        }
+
+        gfs_free(i);
+        e = GetLastError();
+        if (e == 3)
+            return -6;
+        if ((e == 4) || (e == 29) || (e == 30))
+            return -9;
+        if ((e == 5) || (e == 19) || (e == 33) || (e == 32))
+            return -7;
+        if ((e == 15) || (e == 21))
+            return -8;
+        if (e == 2)
+            return -5;
+        // showvalue(e);
+        return -5; // assume (2)
+    }              // invalid handle
+
+    if (how == 2) {
+        // truncate file if size is not 0
+        static DWORD GetFileSize_low, GetFileSize_high;
+        GetFileSize_low = GetFileSize(f_w->file_handle, &GetFileSize_high);
+        if (GetFileSize_low || GetFileSize_high) {
+            CloseHandle(f_w->file_handle);
+            x3 = TRUNCATE_EXISTING;
+            f_w->file_handle = CreateFile(fixdir(filenamez), x, x2, NULL, x3, FILE_ATTRIBUTE_NORMAL, NULL);
+
+            if (f_w->file_handle == INVALID_HANDLE_VALUE) {
+                gfs_free(i);
+                e = GetLastError();
+                if (e == 3)
+                    return -6;
+                if ((e == 4) || (e == 29) || (e == 30))
+                    return -9;
+                if ((e == 5) || (e == 19) || (e == 33) || (e == 32))
+                    return -7;
+                if ((e == 15) || (e == 21))
+                    return -8;
+                if (e == 2)
+                    return -5;
+                // showvalue(e);
+                return -5; // assume (2)
+            }              // invalid handle
+        }
+    } // how==2
+    f->open = 1;
+    return i;
+#endif
+
+    return -1; // non-specific fail
+}
+
+int32 gfs_setpos(int32 i, int64 position) {
+    if (!gfs_validhandle(i))
+        return -2; // invalid handle
+    if (position < 0)
+        return -4; // illegal function call
+
+    static gfs_file_struct *f;
+    f = &gfs_file[i];
+
+#ifdef GFS_C
+    if (f->read) {
+        f->file_handle->clear();
+        f->file_handle->seekg(position);
+    }
+    if (f->write) {
+        f->file_handle->clear();
+        f->file_handle->seekp(position);
+    }
+    f->pos = position;
+    if (f->pos <= gfs_lof(i)) {
+        f->eof_passed = 0;
+        f->eof_reached = 0;
+    }
+    return 0;
+#endif
+
+#ifdef GFS_WINDOWS
+    static gfs_file_win_struct *f_w;
+    f_w = &gfs_file_win[i];
+    if (SetFilePointer(f_w->file_handle, (int32)position, (long *)(((int32 *)&position) + 1), FILE_BEGIN) ==
+        0xFFFFFFFF) { /*Note that it is not an error to set the file pointer to a position beyond the end of the file. The size of the file does not increase
+                         until you call the SetEndOfFile, WriteFile, or WriteFileEx function.*/
+        if (GetLastError() != NO_ERROR) {
+            return -3; // bad file mode
+        }
+    }
+    f->pos = position;
+    if (f->pos <= gfs_lof(i)) {
+        f->eof_passed = 0;
+        f->eof_reached = 0;
+    }
+    return 0;
+#endif
+
+    return -1;
+}
+
+int64 gfs_getpos(int32 i) {
+    if (!gfs_validhandle(i))
+        return -2; // invalid handle
+    static gfs_file_struct *f;
+    f = &gfs_file[i];
+    return f->pos;
+}
+
+int32 gfs_write(int32 i, int64 position, uint8 *data, int64 size) {
+    if (!gfs_validhandle(i))
+        return -2; // invalid handle
+    static int32 e;
+    static gfs_file_struct *f;
+    f = &gfs_file[i];
+    if (!f->write)
+        return -3; // bad file mode
+    if (size < 0)
+        return -4; // illegal function call
+    static int32 x;
+    if (position != -1) {
+        if (x = gfs_setpos(i, position))
+            return x; //(pass on error)
+    }
+
+#ifdef GFS_C
+    f->file_handle->clear();
+    f->file_handle->write((char *)data, size);
+    if (f->file_handle->bad()) {
+        return -7; // assume: permission denied
+    }
+    f->pos += size;
+    return 0;
+#endif
+
+#ifdef GFS_WINDOWS
+    static gfs_file_win_struct *f_w;
+    f_w = &gfs_file_win[i];
+    static uint32 size2;
+    static int64 written = 0;
+    while (size) {
+        if (size > 4294967295) {
+            size2 = 4294967295;
+            size -= 4294967295;
+        } else {
+            size2 = size;
+            size = 0;
+        }
+        if (!WriteFile(f_w->file_handle, data, size2, (unsigned long *)&written, NULL)) {
+            e = GetLastError();
+            if ((e == 5) || (e == 33))
+                return -7; // permission denied
+            return -9;     // assume: path/file access error
+        }
+        data += written;
+        f->pos += written;
+        if (written != size2)
+            return -1;
+    }
+    return 0;
+#endif
+
+    return -1;
+}
+
+int64 gfs_read_bytes_value;
+int64 gfs_read_bytes() { return gfs_read_bytes_value; }
+
+int32 gfs_read(int32 i, int64 position, uint8 *data, int64 size) {
+    gfs_read_bytes_value = 0;
+    if (!gfs_validhandle(i))
+        return -2; // invalid handle
+    static int32 e;
+    static gfs_file_struct *f;
+    f = &gfs_file[i];
+    if (!f->read)
+        return -3; // bad file mode
+    if (size < 0)
+        return -4; // illegal function call
+    static int32 x;
+    if (position != -1) {
+        if (x = gfs_setpos(i, position))
+            return x; //(pass on error)
+    }
+
+#ifdef GFS_C
+    f->file_handle->clear();
+    f->file_handle->read((char *)data, size);
+    if (f->file_handle->bad()) { // note: 'eof' also sets the 'fail' flag, so only the the 'bad' flag is checked
+        return -7;               // assume: permission denied
+    }
+    static int64 bytesread;
+    bytesread = f->file_handle->gcount();
+    gfs_read_bytes_value = bytesread;
+    f->pos += bytesread;
+    if (bytesread < size) {
+        memset(data + bytesread, 0, size - bytesread);
+        f->eof_passed = 1;
+        return -10;
+    }
+    f->eof_passed = 0;
+    return 0;
+#endif
+
+#ifdef GFS_WINDOWS
+    static gfs_file_win_struct *f_w;
+    f_w = &gfs_file_win[i];
+    static uint32 size2;
+    static int64 bytesread = 0;
+    while (size) {
+        if (size > 4294967295) {
+            size2 = 4294967295;
+            size -= 4294967295;
+        } else {
+            size2 = size;
+            size = 0;
+        }
+
+        if (ReadFile(f_w->file_handle, data, size2, (unsigned long *)&bytesread, NULL)) {
+            data += bytesread;
+            f->pos += bytesread;
+            gfs_read_bytes_value += bytesread;
+            if (bytesread != size2) {
+                ZeroMemory(data, size + (size2 - bytesread)); // nullify remaining buffer
+                f->eof_passed = 1;
+                return -10;
+            } // eof passed
+        } else {
+            // error
+            e = GetLastError();
+            if ((e == 5) || (e == 33))
+                return -7; // permission denied
+            // showvalue(e);
+            return -9; // assume: path/file access error
+        }
+    }
+    f->eof_passed = 0;
+    return 0;
+#endif
+
+    return -1;
+}
+
+int32 gfs_eof_reached(int32 i) {
+    if (!gfs_validhandle(i))
+        return -2; // invalid handle
+    if (gfs_getpos(i) >= gfs_lof(i))
+        return 1;
+    return 0;
+}
+
+int32 gfs_eof_passed(int32 i) {
+    if (!gfs_validhandle(i))
+        return -2; // invalid handle
+    static gfs_file_struct *f;
+    f = &gfs_file[i];
+    if (f->eof_passed)
+        return 1;
+    return 0;
+}
+
+int32 gfs_lock(int32 i, int64 offset_start, int64 offset_end) {
+    // if offset_start==-1, 'from beginning' (typically offset 0) is assumed
+    // if offset_end==-1, 'to end/infinity' is assumed
+    // range is inclusive of start and end
+    if (!gfs_validhandle(i))
+        return -2; // invalid handle
+    static gfs_file_struct *f;
+    f = &gfs_file[i];
+
+    if (offset_start == -1)
+        offset_start = 0;
+    if (offset_start < 0)
+        return -4; // illegal function call
+    if (offset_end < -1)
+        return -4; // illegal function call
+        // note: -1 equates to highest uint64 value (infinity)
+        //      All other negative end values are illegal
+
+#ifdef GFS_C
+    return 0;
+#endif
+
+#ifdef GFS_WINDOWS
+    static gfs_file_win_struct *f_w;
+    f_w = &gfs_file_win[i];
+    uint64 bytes;
+    bytes = offset_end;
+    if (bytes != -1)
+        bytes = bytes - offset_start + 1;
+    if (!LockFile(f_w->file_handle, *((DWORD *)(&offset_start)), *(((DWORD *)(&offset_start)) + 1), *((DWORD *)(&bytes)), *(((DWORD *)(&bytes)) + 1))) {
+        // failed
+        static int32 e;
+        e = GetLastError();
+        if ((e == 5) || (e == 33))
+            return -7; // permission denied
+        // showvalue(e);
+        return -9; // assume: path/file access error
+    }
+    return 0;
+#endif
+
+    return -1;
+}
+
+int32 gfs_unlock(int32 i, int64 offset_start, int64 offset_end) {
+    // if offset_start==-1, 'from beginning' (typically offset 0) is assumed
+    // if offset_end==-1, 'to end/infinity' is assumed
+    // range is inclusive of start and end
+    if (!gfs_validhandle(i))
+        return -2; // invalid handle
+    static gfs_file_struct *f;
+    f = &gfs_file[i];
+
+    if (offset_start == -1)
+        offset_start = 0;
+    if (offset_start < 0)
+        return -4; // illegal function call
+    if (offset_end < -1)
+        return -4; // illegal function call
+        // note: -1 equates to highest uint64 value (infinity)
+        //      All other negative end values are illegal
+
+#ifdef GFS_C
+    return 0;
+#endif
+
+#ifdef GFS_WINDOWS
+    static gfs_file_win_struct *f_w;
+    f_w = &gfs_file_win[i];
+    uint64 bytes;
+    bytes = offset_end;
+    if (bytes != -1)
+        bytes = bytes - offset_start + 1;
+    if (!UnlockFile(f_w->file_handle, *((DWORD *)(&offset_start)), *(((DWORD *)(&offset_start)) + 1), *((DWORD *)(&bytes)), *(((DWORD *)(&bytes)) + 1))) {
+        // failed
+        static int32 e;
+        e = GetLastError();
+        if ((e == 5) || (e == 33) || (e == 158))
+            return -7; // permission denied
+        // showvalue(e);
+        return -9; // assume: path/file access error
+    }
+    return 0;
+#endif
+
+    return -1;
+}
+
+void sub_lock(int32 i, int64 start, int64 end, int32 passed) {
+    if (new_error)
+        return;
+    if (gfs_fileno_valid(i) != 1) {
+        error(52);
+        return;
+    }                  // Bad file name or number
+    i = gfs_fileno[i]; // convert fileno to gfs index
+    static gfs_file_struct *gfs;
+    gfs = &gfs_file[i];
+
+    // If the file has been opened for sequential input or output, LOCK and UNLOCK affect the entire file, regardless of the range specified by start& and end&.
+    if (gfs->type > 2)
+        passed = 0;
+
+    if (passed & 1) {
+        start--;
+        if (start < 0) {
+            error(5);
+            return;
+        }
+        if (gfs->type == 1)
+            start *= gfs->record_length;
+    } else {
+        start = -1;
+    }
+
+    if (passed & 2) {
+        end--;
+        if (end < 0) {
+            error(5);
+            return;
+        }
+        if (gfs->type == 1)
+            end = end * gfs->record_length + gfs->record_length - 1;
+    } else {
+        end = start;
+        if (gfs->type == 1)
+            end = start + gfs->record_length - 1;
+        if (!(passed & 1))
+            end = -1;
+    }
+
+    int32 e;
+    e = gfs_lock(i, start, end);
+    if (e) {
+        if (e == -2) {
+            error(258);
+            return;
+        } // invalid handle
+        if (e == -4) {
+            error(5);
+            return;
+        } // illegal function call
+        if (e == -7) {
+            error(70);
+            return;
+        } // permission denied
+        error(75);
+        return; // assume[-9]: path/file access error
+    }
+}
+
+void sub_unlock(int32 i, int64 start, int64 end, int32 passed) {
+    if (new_error)
+        return;
+    if (gfs_fileno_valid(i) != 1) {
+        error(52);
+        return;
+    }                  // Bad file name or number
+    i = gfs_fileno[i]; // convert fileno to gfs index
+    static gfs_file_struct *gfs;
+    gfs = &gfs_file[i];
+
+    // If the file has been opened for sequential input or output, LOCK and UNLOCK affect the entire file, regardless of the range specified by start& and end&.
+    if (gfs->type > 2)
+        passed = 0;
+
+    if (passed & 1) {
+        start--;
+        if (start < 0) {
+            error(5);
+            return;
+        }
+        if (gfs->type == 1)
+            start *= gfs->record_length;
+    } else {
+        start = -1;
+    }
+
+    if (passed & 2) {
+        end--;
+        if (end < 0) {
+            error(5);
+            return;
+        }
+        if (gfs->type == 1)
+            end = end * gfs->record_length + gfs->record_length - 1;
+    } else {
+        end = start;
+        if (gfs->type == 1)
+            end = start + gfs->record_length - 1;
+        if (!(passed & 1))
+            end = -1;
+    }
+
+    int32 e;
+    e = gfs_unlock(i, start, end);
+    if (e) {
+        if (e == -2) {
+            error(258);
+            return;
+        } // invalid handle
+        if (e == -4) {
+            error(5);
+            return;
+        } // illegal function call
+        if (e == -7) {
+            error(70);
+            return;
+        } // permission denied
+        error(75);
+        return; // assume[-9]: path/file access error
+    }
+}
+
+#ifdef DEPENDENCY_SCREENIMAGE
+int32 func__screenimage(int32 x1, int32 y1, int32 x2, int32 y2, int32 passed) {
+
+#    ifdef QB64_WINDOWS
+
+    static int32 init = 0;
+    static int32 x, y, w, h;
+
+    static HWND hwnd;
+    static RECT rect;
+    static HDC hdc;
+
+    if (!init) {
+        hwnd = GetDesktopWindow();
+        GetWindowRect(hwnd, &rect);
+        x = rect.right - rect.left;
+        y = rect.bottom - rect.top;
+    }
+
+    hdc = GetDC(NULL);
+
+    static HDC hdc2 = NULL;
+    static HBITMAP bitmap;
+    static int32 bx, by;
+
+    if (passed) {
+        if (x1 < 0)
+            x1 = 0;
+        if (y1 < 0)
+            y1 = 0;
+        if (x2 > x - 1)
+            x2 = x - 1;
+        if (y2 > y - 1)
+            y2 = y - 1;
+        w = x2 - x1 + 1;
+        h = y2 - y1 + 1;
+    } else {
+        x1 = 0;
+        x2 = x - 1;
+        y1 = 0;
+        y2 = y - 1;
+        w = x;
+        h = y;
+    }
+
+    if (hdc2) {
+        if ((w != bx) || (h != by)) {
+            DeleteObject(bitmap);
+            ReleaseDC(NULL, hdc2);
+            hdc2 = CreateCompatibleDC(hdc);
+            bitmap = CreateCompatibleBitmap(hdc, w, h);
+            bx = w;
+            by = h;
+            SelectObject(hdc2, bitmap);
+        }
+    } else {
+        hdc2 = CreateCompatibleDC(hdc);
+        bitmap = CreateCompatibleBitmap(hdc, w, h);
+        bx = w;
+        by = h;
+        SelectObject(hdc2, bitmap);
+    }
+
+    init = 1;
+
+    BitBlt(hdc2, 0, 0, w, h, hdc, x1, y1, SRCCOPY);
+
+    static BITMAPFILEHEADER bmfHeader;
+    static BITMAPINFOHEADER bi;
+    bi.biSize = sizeof(BITMAPINFOHEADER);
+    bi.biWidth = w;
+    bi.biHeight = -h; // A bottom-up DIB is specified by setting the height to a positive number, while a top-down DIB is specified by setting the height to a
+                      // negative number. The bitmap color table will be appended to the BITMAPINFO structure.
+    bi.biPlanes = 1;
+    bi.biBitCount = 32;
+    bi.biCompression = BI_RGB;
+    bi.biSizeImage = 0;
+    bi.biXPelsPerMeter = 0;
+    bi.biYPelsPerMeter = 0;
+    bi.biClrUsed = 0;
+    bi.biClrImportant = 0;
+
+    static int32 i, i2;
+    i2 = func__dest();
+    i = func__newimage(w, h, 32, 1);
+    sub__dest(i);
+
+    GetDIBits(hdc2, bitmap, 0, h, write_page->offset, (BITMAPINFO *)&bi, DIB_RGB_COLORS);
+    sub__setalpha(255, NULL, NULL, NULL, 0);
+    sub__dest(i2);
+
+    ReleaseDC(NULL, hdc);
+    return i;
+#    else
+    return func__newimage(func_screenwidth(), func_screenheight(), 32, 1);
+#    endif
+}
+#endif // DEPENDENCY_SCREENIMAGE
+
+void sub__screenclick(int32 x, int32 y, int32 button, int32 passed) {
+
+#ifdef QB64_WINDOWS
+
+    static INPUT input;
+
+    ZeroMemory(&input, sizeof(INPUT));
+    input.type = INPUT_MOUSE;
+    input.mi.dwFlags = MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_MOVE;
+    static HWND hwnd;
+    hwnd = GetDesktopWindow();
+    static RECT rect;
+    GetWindowRect(hwnd, &rect);
+    static double x2, y2, fx, fy;
+    x2 = rect.right - rect.left;
+    y2 = rect.bottom - rect.top;
+    fx = x * (65535.0f / x2);
+    fy = y * (65535.0f / y2);
+    input.mi.dx = fx;
+    input.mi.dy = fy;
+    SendInput(1, &input, sizeof(INPUT));
+
+    ZeroMemory(&input, sizeof(INPUT));
+    input.type = INPUT_MOUSE;
+    input.mi.dwFlags = MOUSEEVENTF_LEFTDOWN;
+    SendInput(1, &input, sizeof(INPUT));
+
+    ZeroMemory(&input, sizeof(INPUT));
+    input.type = INPUT_MOUSE;
+
+    if (passed) {
+        if (button == 1) {
+            input.mi.dwFlags = MOUSEEVENTF_LEFTDOWN;
+        }
+        if (button == 2) {
+            input.mi.dwFlags = MOUSEEVENTF_RIGHTDOWN;
+        }
+        if (button == 3) {
+            input.mi.dwFlags = MOUSEEVENTF_MIDDLEDOWN;
+        }
+        SendInput(1, &input, sizeof(INPUT));
+
+        ZeroMemory(&input, sizeof(INPUT));
+        input.type = INPUT_MOUSE;
+
+        if (button == 1) {
+            input.mi.dwFlags = MOUSEEVENTF_LEFTUP;
+        }
+        if (button == 2) {
+            input.mi.dwFlags = MOUSEEVENTF_RIGHTUP;
+        }
+        if (button == 3) {
+            input.mi.dwFlags = MOUSEEVENTF_MIDDLEUP;
+        }
+    } else {
+        input.mi.dwFlags = MOUSEEVENTF_LEFTDOWN;
+
+        SendInput(1, &input, sizeof(INPUT));
+
+        ZeroMemory(&input, sizeof(INPUT));
+        input.type = INPUT_MOUSE;
+
+        input.mi.dwFlags = MOUSEEVENTF_LEFTUP;
+    }
+    SendInput(1, &input, sizeof(INPUT));
+
+#endif
+
+#ifdef QB64_MACOSX
+    CGEventRef click1_down = CGEventCreateMouseEvent(NULL, kCGEventLeftMouseDown, CGPointMake(x, y), kCGMouseButtonLeft);
+    CGEventRef click1_up = CGEventCreateMouseEvent(NULL, kCGEventLeftMouseUp, CGPointMake(x, y), kCGMouseButtonLeft);
+    CGEventPost(kCGHIDEventTap, click1_down);
+    CGEventPost(kCGHIDEventTap, click1_up);
+    CFRelease(click1_up);
+    CFRelease(click1_down);
+#endif
+}
+
+#ifdef QB64_MACOSX
+// 128 indicates SHIFT must be held to achieve the indexed ASCII character
+static uint16 ASCII_TO_MACVK[] = {0,
+                                  0,
+                                  0,
+                                  0,
+                                  0,
+                                  0,
+                                  0,
+                                  0,
+                                  0x3300 + 8,
+                                  0x3000 + 9,
+                                  0,
+                                  0,
+                                  0,
+                                  0x2400 + 13,
+                                  0,
+                                  0,
+                                  0,
+                                  0,
+                                  0,
+                                  0,
+                                  0,
+                                  0,
+                                  0,
+                                  0,
+                                  0,
+                                  0,
+                                  0,
+                                  0x3500 + 27,
+                                  0,
+                                  0,
+                                  0,
+                                  0,
+                                  0x3100 + 32,
+                                  0x1200 + 33 + 128,
+                                  0x2700 + 34 + 128,
+                                  0x1400 + 35 + 128,
+                                  0x1500 + 36 + 128,
+                                  0x1700 + 37 + 128,
+                                  0x1A00 + 38 + 128,
+                                  0x2700 + 39,
+                                  0x1900 + 40 + 128,
+                                  0x1D00 + 41 + 128,
+                                  0x1C00 + 42 + 128,
+                                  0x1800 + 43 + 128,
+                                  0x2B00 + 44,
+                                  0x1B00 + 45,
+                                  0x2F00 + 46,
+                                  0x2C00 + 47,
+                                  0x1D00 + 48,
+                                  0x1200 + 49,
+                                  0x1300 + 50,
+                                  0x1400 + 51,
+                                  0x1500 + 52,
+                                  0x1700 + 53,
+                                  0x1600 + 54,
+                                  0x1A00 + 55,
+                                  0x1C00 + 56,
+                                  0x1900 + 57,
+                                  0x2900 + 58 + 128,
+                                  0x2900 + 59,
+                                  0x2B00 + 60 + 128,
+                                  0x1800 + 61,
+                                  0x2F00 + 62 + 128,
+                                  0x2C00 + 63 + 128,
+                                  0x1300 + 64 + 128,
+                                  0x0000 + 65 + 128,
+                                  0x0B00 + 66 + 128,
+                                  0x0800 + 67 + 128,
+                                  0x0200 + 68 + 128,
+                                  0x0E00 + 69 + 128,
+                                  0x0300 + 70 + 128,
+                                  0x0500 + 71 + 128,
+                                  0x0400 + 72 + 128,
+                                  0x2200 + 73 + 128,
+                                  0x2600 + 74 + 128,
+                                  0x2800 + 75 + 128,
+                                  0x2500 + 76 + 128,
+                                  0x2E00 + 77 + 128,
+                                  0x2D00 + 78 + 128,
+                                  0x1F00 + 79 + 128,
+                                  0x2300 + 80 + 128,
+                                  0x0C00 + 81 + 128,
+                                  0x0F00 + 82 + 128,
+                                  0x0100 + 83 + 128,
+                                  0x1100 + 84 + 128,
+                                  0x2000 + 85 + 128,
+                                  0x0900 + 86 + 128,
+                                  0x0D00 + 87 + 128,
+                                  0x0700 + 88 + 128,
+                                  0x1000 + 89 + 128,
+                                  0x0600 + 90 + 128,
+                                  0x2100 + 91,
+                                  0x2A00 + 92,
+                                  0x1E00 + 93,
+                                  0x1600 + 94 + 128,
+                                  0x1B00 + 95 + 128,
+                                  0x3200 + 96,
+                                  0x0000 + 65 + 32,
+                                  0x0B00 + 66 + 32,
+                                  0x0800 + 67 + 32,
+                                  0x0200 + 68 + 32,
+                                  0x0E00 + 69 + 32,
+                                  0x0300 + 70 + 32,
+                                  0x0500 + 71 + 32,
+                                  0x0400 + 72 + 32,
+                                  0x2200 + 73 + 32,
+                                  0x2600 + 74 + 32,
+                                  0x2800 + 75 + 32,
+                                  0x2500 + 76 + 32,
+                                  0x2E00 + 77 + 32,
+                                  0x2D00 + 78 + 32,
+                                  0x1F00 + 79 + 32,
+                                  0x2300 + 80 + 32,
+                                  0x0C00 + 81 + 32,
+                                  0x0F00 + 82 + 32,
+                                  0x0100 + 83 + 32,
+                                  0x1100 + 84 + 32,
+                                  0x2000 + 85 + 32,
+                                  0x0900 + 86 + 32,
+                                  0x0D00 + 87 + 32,
+                                  0x0700 + 88 + 32,
+                                  0x1000 + 89 + 32,
+                                  0x0600 + 90 + 32,
+                                  0x2100 + 123 + 128,
+                                  0x2A00 + 124 + 128,
+                                  0x1E00 + 125 + 128,
+                                  0x3200 + 126 + 128,
+                                  0,
+                                  0,
+                                  0,
+                                  0,
+                                  0,
+                                  0,
+                                  0,
+                                  0,
+                                  0,
+                                  0,
+                                  0,
+                                  0,
+                                  0,
+                                  0,
+                                  0,
+                                  0,
+                                  0,
+                                  0,
+                                  0,
+                                  0,
+                                  0,
+                                  0,
+                                  0,
+                                  0,
+                                  0,
+                                  0,
+                                  0,
+                                  0,
+                                  0,
+                                  0,
+                                  0,
+                                  0,
+                                  0,
+                                  0,
+                                  0,
+                                  0,
+                                  0,
+                                  0,
+                                  0,
+                                  0,
+                                  0,
+                                  0,
+                                  0,
+                                  0,
+                                  0,
+                                  0,
+                                  0,
+                                  0,
+                                  0,
+                                  0,
+                                  0,
+                                  0,
+                                  0,
+                                  0,
+                                  0,
+                                  0,
+                                  0,
+                                  0,
+                                  0,
+                                  0,
+                                  0,
+                                  0,
+                                  0,
+                                  0,
+                                  0,
+                                  0,
+                                  0,
+                                  0,
+                                  0,
+                                  0,
+                                  0,
+                                  0,
+                                  0,
+                                  0,
+                                  0,
+                                  0,
+                                  0,
+                                  0,
+                                  0,
+                                  0,
+                                  0,
+                                  0,
+                                  0,
+                                  0,
+                                  0,
+                                  0,
+                                  0,
+                                  0,
+                                  0,
+                                  0,
+                                  0,
+                                  0,
+                                  0,
+                                  0,
+                                  0,
+                                  0,
+                                  0,
+                                  0,
+                                  0,
+                                  0,
+                                  0,
+                                  0,
+                                  0,
+                                  0,
+                                  0,
+                                  0,
+                                  0,
+                                  0,
+                                  0,
+                                  0,
+                                  0,
+                                  0,
+                                  0,
+                                  0,
+                                  0,
+                                  0,
+                                  0,
+                                  0,
+                                  0,
+                                  0,
+                                  0,
+                                  0,
+                                  0,
+                                  0,
+                                  0,
+                                  0,
+                                  0,
+                                  0,
+                                  0};
+#endif
+
+int32 MACVK_ANSI_A = 0x00;
+int32 MACVK_ANSI_S = 0x01;
+int32 MACVK_ANSI_D = 0x02;
+int32 MACVK_ANSI_F = 0x03;
+int32 MACVK_ANSI_H = 0x04;
+int32 MACVK_ANSI_G = 0x05;
+int32 MACVK_ANSI_Z = 0x06;
+int32 MACVK_ANSI_X = 0x07;
+int32 MACVK_ANSI_C = 0x08;
+int32 MACVK_ANSI_V = 0x09;
+int32 MACVK_ANSI_B = 0x0B;
+int32 MACVK_ANSI_Q = 0x0C;
+int32 MACVK_ANSI_W = 0x0D;
+int32 MACVK_ANSI_E = 0x0E;
+int32 MACVK_ANSI_R = 0x0F;
+int32 MACVK_ANSI_Y = 0x10;
+int32 MACVK_ANSI_T = 0x11;
+int32 MACVK_ANSI_1 = 0x12;
+int32 MACVK_ANSI_2 = 0x13;
+int32 MACVK_ANSI_3 = 0x14;
+int32 MACVK_ANSI_4 = 0x15;
+int32 MACVK_ANSI_6 = 0x16;
+int32 MACVK_ANSI_5 = 0x17;
+int32 MACVK_ANSI_Equal = 0x18;
+int32 MACVK_ANSI_9 = 0x19;
+int32 MACVK_ANSI_7 = 0x1A;
+int32 MACVK_ANSI_Minus = 0x1B;
+int32 MACVK_ANSI_8 = 0x1C;
+int32 MACVK_ANSI_0 = 0x1D;
+int32 MACVK_ANSI_RightBracket = 0x1E;
+int32 MACVK_ANSI_O = 0x1F;
+int32 MACVK_ANSI_U = 0x20;
+int32 MACVK_ANSI_LeftBracket = 0x21;
+int32 MACVK_ANSI_I = 0x22;
+int32 MACVK_ANSI_P = 0x23;
+int32 MACVK_ANSI_L = 0x25;
+int32 MACVK_ANSI_J = 0x26;
+int32 MACVK_ANSI_Quote = 0x27;
+int32 MACVK_ANSI_K = 0x28;
+int32 MACVK_ANSI_Semicolon = 0x29;
+int32 MACVK_ANSI_Backslash = 0x2A;
+int32 MACVK_ANSI_Comma = 0x2B;
+int32 MACVK_ANSI_Slash = 0x2C;
+int32 MACVK_ANSI_N = 0x2D;
+int32 MACVK_ANSI_M = 0x2E;
+int32 MACVK_ANSI_Period = 0x2F;
+int32 MACVK_ANSI_Grave = 0x32;
+int32 MACVK_ANSI_KeypadDecimal = 0x41;
+int32 MACVK_ANSI_KeypadMultiply = 0x43;
+int32 MACVK_ANSI_KeypadPlus = 0x45;
+int32 MACVK_ANSI_KeypadClear = 0x47;
+int32 MACVK_ANSI_KeypadDivide = 0x4B;
+int32 MACVK_ANSI_KeypadEnter = 0x4C;
+int32 MACVK_ANSI_KeypadMinus = 0x4E;
+int32 MACVK_ANSI_KeypadEquals = 0x51;
+int32 MACVK_ANSI_Keypad0 = 0x52;
+int32 MACVK_ANSI_Keypad1 = 0x53;
+int32 MACVK_ANSI_Keypad2 = 0x54;
+int32 MACVK_ANSI_Keypad3 = 0x55;
+int32 MACVK_ANSI_Keypad4 = 0x56;
+int32 MACVK_ANSI_Keypad5 = 0x57;
+int32 MACVK_ANSI_Keypad6 = 0x58;
+int32 MACVK_ANSI_Keypad7 = 0x59;
+int32 MACVK_ANSI_Keypad8 = 0x5B;
+int32 MACVK_ANSI_Keypad9 = 0x5C;
+int32 MACVK_Return = 0x24;
+int32 MACVK_Tab = 0x30;
+int32 MACVK_Space = 0x31;
+int32 MACVK_Delete = 0x33;
+int32 MACVK_Escape = 0x35;
+int32 MACVK_Command = 0x37;
+int32 MACVK_Shift = 0x38;
+int32 MACVK_CapsLock = 0x39;
+int32 MACVK_Option = 0x3A;
+int32 MACVK_Control = 0x3B;
+int32 MACVK_RightShift = 0x3C;
+int32 MACVK_RightOption = 0x3D;
+int32 MACVK_RightControl = 0x3E;
+int32 MACVK_Function = 0x3F;
+int32 MACVK_F17 = 0x40;
+int32 MACVK_VolumeUp = 0x48;
+int32 MACVK_VolumeDown = 0x49;
+int32 MACVK_Mute = 0x4A;
+int32 MACVK_F18 = 0x4F;
+int32 MACVK_F19 = 0x50;
+int32 MACVK_F20 = 0x5A;
+int32 MACVK_F5 = 0x60;
+int32 MACVK_F6 = 0x61;
+int32 MACVK_F7 = 0x62;
+int32 MACVK_F3 = 0x63;
+int32 MACVK_F8 = 0x64;
+int32 MACVK_F9 = 0x65;
+int32 MACVK_F11 = 0x67;
+int32 MACVK_F13 = 0x69;
+int32 MACVK_F16 = 0x6A;
+int32 MACVK_F14 = 0x6B;
+int32 MACVK_F10 = 0x6D;
+int32 MACVK_F12 = 0x6F;
+int32 MACVK_F15 = 0x71;
+int32 MACVK_Help = 0x72;
+int32 MACVK_Home = 0x73;
+int32 MACVK_PageUp = 0x74;
+int32 MACVK_ForwardDelete = 0x75;
+int32 MACVK_F4 = 0x76;
+int32 MACVK_End = 0x77;
+int32 MACVK_F2 = 0x78;
+int32 MACVK_PageDown = 0x79;
+int32 MACVK_F1 = 0x7A;
+int32 MACVK_LeftArrow = 0x7B;
+int32 MACVK_RightArrow = 0x7C;
+int32 MACVK_DownArrow = 0x7D;
+int32 MACVK_UpArrow = 0x7E;
+int32 MACVK_ISO_Section = 0x0A;
+int32 MACVK_JIS_Yen = 0x5D;
+int32 MACVK_JIS_Underscore = 0x5E;
+int32 MACVK_JIS_KeypadComma = 0x5F;
+int32 MACVK_JIS_Eisu = 0x66;
+int32 MACVK_JIS_Kana = 0x68;
+
+void sub__screenprint(qbs *txt) {
+
+    static int32 i, s, x, vk, c;
+
+#ifdef QB64_MACOSX
+    /* MACOSX virtual key code reference (with ASCII value & shift state):
+        static int32 MACVK_ANSI_A                    = 0x0000+65+32;
+        static int32 MACVK_ANSI_S                    = 0x0100+83+32;
+        static int32 MACVK_ANSI_D                    = 0x0200+68+32;
+        static int32 MACVK_ANSI_F                    = 0x0300+70+32;
+        static int32 MACVK_ANSI_H                    = 0x0400+72+32;
+        static int32 MACVK_ANSI_G                    = 0x0500+71+32;
+        static int32 MACVK_ANSI_Z                    = 0x0600+90+32;
+        static int32 MACVK_ANSI_X                    = 0x0700+88+32;
+        static int32 MACVK_ANSI_C                    = 0x0800+67+32;
+        static int32 MACVK_ANSI_V                    = 0x0900+86+32;
+        static int32 MACVK_ANSI_B                    = 0x0B00+66+32;
+        static int32 MACVK_ANSI_Q                    = 0x0C00+81+32;
+        static int32 MACVK_ANSI_W                    = 0x0D00+87+32;
+        static int32 MACVK_ANSI_E                    = 0x0E00+69+32;
+        static int32 MACVK_ANSI_R                    = 0x0F00+82+32;
+        static int32 MACVK_ANSI_Y                    = 0x1000+89+32;
+        static int32 MACVK_ANSI_T                    = 0x1100+84+32;
+        static int32 MACVK_ANSI_1                    = 0x1200+49;
+        static int32 MACVK_ANSI_2                    = 0x1300+50;
+        static int32 MACVK_ANSI_3                    = 0x1400+51;
+        static int32 MACVK_ANSI_4                    = 0x1500+52;
+        static int32 MACVK_ANSI_6                    = 0x1600+54;
+        static int32 MACVK_ANSI_5                    = 0x1700+53;
+        static int32 MACVK_ANSI_Equal                = 0x1800+61;
+        static int32 MACVK_ANSI_9                    = 0x1900+57;
+        static int32 MACVK_ANSI_7                    = 0x1A00+55;
+        static int32 MACVK_ANSI_Minus                = 0x1B00+45;
+        static int32 MACVK_ANSI_8                    = 0x1C00+56;
+        static int32 MACVK_ANSI_0                    = 0x1D00+48;
+        static int32 MACVK_ANSI_RightBracket         = 0x1E00+93;
+        static int32 MACVK_ANSI_O                    = 0x1F00+79+32;
+        static int32 MACVK_ANSI_U                    = 0x2000+85+32;
+        static int32 MACVK_ANSI_LeftBracket          = 0x2100+91;
+        static int32 MACVK_ANSI_I                    = 0x2200+73+32;
+        static int32 MACVK_ANSI_P                    = 0x2300+80+32;
+        static int32 MACVK_ANSI_L                    = 0x2500+76+32;
+        static int32 MACVK_ANSI_J                    = 0x2600+74+32;
+        static int32 MACVK_ANSI_Quote                = 0x2700+39;
+        static int32 MACVK_ANSI_K                    = 0x2800+75+32;
+        static int32 MACVK_ANSI_Semicolon            = 0x2900+59;
+        static int32 MACVK_ANSI_Backslash            = 0x2A00+92;
+        static int32 MACVK_ANSI_Comma                = 0x2B00+44;
+        static int32 MACVK_ANSI_Slash                = 0x2C00+47;
+        static int32 MACVK_ANSI_N                    = 0x2D00+78+32;
+        static int32 MACVK_ANSI_M                    = 0x2E00+77+32;
+        static int32 MACVK_ANSI_Period               = 0x2F00+46;
+        static int32 MACVK_ANSI_Grave                = 0x3200+96;
+        static int32 MACVK_ANSI_KeypadDecimal        = 0x4100;
+        static int32 MACVK_ANSI_KeypadMultiply       = 0x4300;
+        static int32 MACVK_ANSI_KeypadPlus           = 0x4500;
+        static int32 MACVK_ANSI_KeypadClear          = 0x4700;
+        static int32 MACVK_ANSI_KeypadDivide         = 0x4B00;
+        static int32 MACVK_ANSI_KeypadEnter          = 0x4C00;
+        static int32 MACVK_ANSI_KeypadMinus          = 0x4E00;
+        static int32 MACVK_ANSI_KeypadEquals         = 0x5100;
+        static int32 MACVK_ANSI_Keypad0              = 0x5200;
+        static int32 MACVK_ANSI_Keypad1              = 0x5300;
+        static int32 MACVK_ANSI_Keypad2              = 0x5400;
+        static int32 MACVK_ANSI_Keypad3              = 0x5500;
+        static int32 MACVK_ANSI_Keypad4              = 0x5600;
+        static int32 MACVK_ANSI_Keypad5              = 0x5700;
+        static int32 MACVK_ANSI_Keypad6              = 0x5800;
+        static int32 MACVK_ANSI_Keypad7              = 0x5900;
+        static int32 MACVK_ANSI_Keypad8              = 0x5B00;
+        static int32 MACVK_ANSI_Keypad9              = 0x5C00;
+        static int32 MACVK_Return                    = 0x2400+13;
+        static int32 MACVK_Tab                       = 0x3000+9;
+        static int32 MACVK_Space                     = 0x3100+32;
+        static int32 MACVK_Delete                    = 0x3300+8;
+        static int32 MACVK_Escape                    = 0x3500+27;
+        static int32 MACVK_Command                   = 0x3700;
+        static int32 MACVK_Shift                     = 0x3800;
+        static int32 MACVK_CapsLock                  = 0x3900;
+        static int32 MACVK_Option                    = 0x3A00;
+        static int32 MACVK_Control                   = 0x3B00;
+        static int32 MACVK_RightShift                = 0x3C00;
+        static int32 MACVK_RightOption               = 0x3D00;
+        static int32 MACVK_RightControl              = 0x3E00;
+        static int32 MACVK_Function                  = 0x3F00;
+        static int32 MACVK_F17                       = 0x4000;
+        static int32 MACVK_VolumeUp                  = 0x4800;
+        static int32 MACVK_VolumeDown                = 0x4900;
+        static int32 MACVK_Mute                      = 0x4A00;
+        static int32 MACVK_F18                       = 0x4F00;
+        static int32 MACVK_F19                       = 0x5000;
+        static int32 MACVK_F20                       = 0x5A00;
+        static int32 MACVK_F5                        = 0x6000;
+        static int32 MACVK_F6                        = 0x6100;
+        static int32 MACVK_F7                        = 0x6200;
+        static int32 MACVK_F3                        = 0x6300;
+        static int32 MACVK_F8                        = 0x6400;
+        static int32 MACVK_F9                        = 0x6500;
+        static int32 MACVK_F11                       = 0x6700;
+        static int32 MACVK_F13                       = 0x6900;
+        static int32 MACVK_F16                       = 0x6A00;
+        static int32 MACVK_F14                       = 0x6B00;
+        static int32 MACVK_F10                       = 0x6D00;
+        static int32 MACVK_F12                       = 0x6F00;
+        static int32 MACVK_F15                       = 0x7100;
+        static int32 MACVK_Help                      = 0x7200;
+        static int32 MACVK_Home                      = 0x7300;
+        static int32 MACVK_PageUp                    = 0x7400;
+        static int32 MACVK_ForwardDelete             = 0x7500;
+        static int32 MACVK_F4                        = 0x7600;
+        static int32 MACVK_End                       = 0x7700;
+        static int32 MACVK_F2                        = 0x7800;
+        static int32 MACVK_PageDown                  = 0x7900;
+        static int32 MACVK_F1                        = 0x7A00;
+        static int32 MACVK_LeftArrow                 = 0x7B00;
+        static int32 MACVK_RightArrow                = 0x7C00;
+        static int32 MACVK_DownArrow                 = 0x7D00;
+        static int32 MACVK_UpArrow                   = 0x7E00;
+        static int32 MACVK_ISO_Section               = 0x0A00;
+        static int32 MACVK_JIS_Yen                   = 0x5D00;
+        static int32 MACVK_JIS_Underscore            = 0x5E00;
+        static int32 MACVK_JIS_KeypadComma           = 0x5F00;
+        static int32 MACVK_JIS_Eisu                  = 0x6600;
+        static int32 MACVK_JIS_Kana                  = 0x6800;
+        static int32 MACVKS_ANSI_A                    = 0x0000+65+128;
+        static int32 MACVKS_ANSI_S                    = 0x0100+83+128;
+        static int32 MACVKS_ANSI_D                    = 0x0200+68+128;
+        static int32 MACVKS_ANSI_F                    = 0x0300+70+128;
+        static int32 MACVKS_ANSI_H                    = 0x0400+72+128;
+        static int32 MACVKS_ANSI_G                    = 0x0500+71+128;
+        static int32 MACVKS_ANSI_Z                    = 0x0600+90+128;
+        static int32 MACVKS_ANSI_X                    = 0x0700+88+128;
+        static int32 MACVKS_ANSI_C                    = 0x0800+67+128;
+        static int32 MACVKS_ANSI_V                    = 0x0900+86+128;
+        static int32 MACVKS_ANSI_B                    = 0x0B00+66+128;
+        static int32 MACVKS_ANSI_Q                    = 0x0C00+81+128;
+
+        static int32 MACVKS_ANSI_W                    = 0x0D00+87+128;
+        static int32 MACVKS_ANSI_E                    = 0x0E00+69+128;
+        static int32 MACVKS_ANSI_R                    = 0x0F00+82+128;
+        static int32 MACVKS_ANSI_Y                    = 0x1000+89+128;
+        static int32 MACVKS_ANSI_T                    = 0x1100+84+128;
+        static int32 MACVKS_ANSI_1                    = 0x1200+33+128;
+        static int32 MACVKS_ANSI_2                    = 0x1300+64+128;
+        static int32 MACVKS_ANSI_3                    = 0x1400+35+128;
+        static int32 MACVKS_ANSI_4                    = 0x1500+36+128;
+        static int32 MACVKS_ANSI_6                    = 0x1600+94+128;
+        static int32 MACVKS_ANSI_5                    = 0x1700+37+128;
+        static int32 MACVKS_ANSI_Equal                = 0x1800+43+128;
+        static int32 MACVKS_ANSI_9                    = 0x1900+40+128;
+        static int32 MACVKS_ANSI_7                    = 0x1A00+38+128;
+        static int32 MACVKS_ANSI_Minus                = 0x1B00+95+128;
+        static int32 MACVKS_ANSI_8                    = 0x1C00+42+128;
+        static int32 MACVKS_ANSI_0                    = 0x1D00+41+128;
+        static int32 MACVKS_ANSI_RightBracket         = 0x1E00+125+128;
+        static int32 MACVKS_ANSI_O                    = 0x1F00+79+128;
+        static int32 MACVKS_ANSI_U                    = 0x2000+85+128;
+        static int32 MACVKS_ANSI_LeftBracket          = 0x2100+123+128;
+        static int32 MACVKS_ANSI_I                    = 0x2200+73+128;
+        static int32 MACVKS_ANSI_P                    = 0x2300+80+128;
+        static int32 MACVKS_ANSI_L                    = 0x2500+76+128;
+        static int32 MACVKS_ANSI_J                    = 0x2600+74+128;
+        static int32 MACVKS_ANSI_Quote                = 0x2700+34+128;
+        static int32 MACVKS_ANSI_K                    = 0x2800+75+128;
+        static int32 MACVKS_ANSI_Semicolon            = 0x2900+58+128;
+        static int32 MACVKS_ANSI_Backslash            = 0x2A00+124+128;
+        static int32 MACVKS_ANSI_Comma                = 0x2B00+60+128;
+        static int32 MACVKS_ANSI_Slash                = 0x2C00+63+128;
+        static int32 MACVKS_ANSI_N                    = 0x2D00+78+128;
+        static int32 MACVKS_ANSI_M                    = 0x2E00+77+128;
+        static int32 MACVKS_ANSI_Period               = 0x2F00+62+128;
+        static int32 MACVKS_ANSI_Grave                = 0x3200+126+128;
+    */
+
+    static CGEventSourceRef es;
+    static CGEventRef e;
+
+    for (i = 0; i < txt->len; i++) {
+        c = txt->chr[i];
+
+        // static int32 i,s,x,vk,c;
+
+        /*
+            CONTROL+{A-Z}
+            The following 'x' letters cannot be simulated this way because they map to implemented control code (8,9,13) functionality:
+            ABCDEFGHIJKLMNOPQRSTUVWXYZ
+            .......xx...x.............
+            Common/standard CTRL+? combinations for copying, pasting, undoing, cutting, etc. are available
+        */
+
+        if ((c >= 1) && (c <= 26)) {
+            if ((c != 8) && (c != 9) && (c != 13)) {
+                // Note: Under MacOSX, COMMAND is used instead of control for general tasks
+                vk = ASCII_TO_MACVK[c + 96] >> 8;
+                es = CGEventSourceCreate(kCGEventSourceStateCombinedSessionState);
+                e = CGEventCreateKeyboardEvent(es, (CGKeyCode)MACVK_Command, 1);
+                CGEventPost(kCGAnnotatedSessionEventTap, e);
+                CFRelease(e);
+                e = CGEventCreateKeyboardEvent(es, (CGKeyCode)vk, 1);
+                CGEventSetFlags(e, kCGEventFlagMaskCommand);
+                CGEventPost(kCGAnnotatedSessionEventTap, e);
+                CFRelease(e);
+                e = CGEventCreateKeyboardEvent(es, (CGKeyCode)vk, 0);
+                CGEventPost(kCGAnnotatedSessionEventTap, e);
+                CFRelease(e);
+                e = CGEventCreateKeyboardEvent(es, (CGKeyCode)MACVK_Command, 0);
+                CGEventPost(kCGAnnotatedSessionEventTap, e);
+                CFRelease(e);
+                goto special_character;
+            }
+        }
+
+        // custom extended characters
+        if (c == 0) {
+            if (i == (txt->len - 1))
+                goto special_character;
+            i++;
+            c = txt->chr[i];
+            if (c == 15) { // SHIFT+TAB
+                vk = MACVK_Tab;
+                es = CGEventSourceCreate(kCGEventSourceStateCombinedSessionState);
+                e = CGEventCreateKeyboardEvent(es, (CGKeyCode)MACVK_Shift, 1);
+                CGEventPost(kCGAnnotatedSessionEventTap, e);
+                CFRelease(e);
+                e = CGEventCreateKeyboardEvent(es, (CGKeyCode)vk, 1);
+                CGEventSetFlags(e, kCGEventFlagMaskShift);
+                CGEventPost(kCGAnnotatedSessionEventTap, e);
+                CFRelease(e);
+                e = CGEventCreateKeyboardEvent(es, (CGKeyCode)vk, 0);
+                CGEventPost(kCGAnnotatedSessionEventTap, e);
+                CFRelease(e);
+                e = CGEventCreateKeyboardEvent(es, (CGKeyCode)MACVK_Shift, 0);
+                CGEventPost(kCGAnnotatedSessionEventTap, e);
+                CFRelease(e);
+                CFRelease(es);
+            }
+            // 4 arrows
+            if (c == 75) {
+                vk = MACVK_LeftArrow;
+                es = CGEventSourceCreate(kCGEventSourceStateCombinedSessionState);
+                e = CGEventCreateKeyboardEvent(es, (CGKeyCode)vk, 1);
+                CGEventPost(kCGAnnotatedSessionEventTap, e);
+                CFRelease(e);
+                e = CGEventCreateKeyboardEvent(es, (CGKeyCode)vk, 0);
+                CGEventPost(kCGAnnotatedSessionEventTap, e);
+                CFRelease(e);
+                CFRelease(es);
+            }
+            if (c == 77) {
+                vk = MACVK_RightArrow;
+                es = CGEventSourceCreate(kCGEventSourceStateCombinedSessionState);
+                e = CGEventCreateKeyboardEvent(es, (CGKeyCode)vk, 1);
+                CGEventPost(kCGAnnotatedSessionEventTap, e);
+                CFRelease(e);
+                e = CGEventCreateKeyboardEvent(es, (CGKeyCode)vk, 0);
+                CGEventPost(kCGAnnotatedSessionEventTap, e);
+                CFRelease(e);
+                CFRelease(es);
+            }
+            if (c == 72) {
+                vk = MACVK_UpArrow;
+                es = CGEventSourceCreate(kCGEventSourceStateCombinedSessionState);
+                e = CGEventCreateKeyboardEvent(es, (CGKeyCode)vk, 1);
+                CGEventPost(kCGAnnotatedSessionEventTap, e);
+                CFRelease(e);
+                e = CGEventCreateKeyboardEvent(es, (CGKeyCode)vk, 0);
+                CGEventPost(kCGAnnotatedSessionEventTap, e);
+                CFRelease(e);
+                CFRelease(es);
+            }
+            if (c == 80) {
+                vk = MACVK_DownArrow;
+                es = CGEventSourceCreate(kCGEventSourceStateCombinedSessionState);
+                e = CGEventCreateKeyboardEvent(es, (CGKeyCode)vk, 1);
+                CGEventPost(kCGAnnotatedSessionEventTap, e);
+                CFRelease(e);
+                e = CGEventCreateKeyboardEvent(es, (CGKeyCode)vk, 0);
+                CGEventPost(kCGAnnotatedSessionEventTap, e);
+                CFRelease(e);
+                CFRelease(es);
+            }
+            // 6 control keys
+            if (c == 82) {
+                vk = MACVK_Help;
+                es = CGEventSourceCreate(kCGEventSourceStateCombinedSessionState);
+                e = CGEventCreateKeyboardEvent(es, (CGKeyCode)vk, 1);
+                CGEventPost(kCGAnnotatedSessionEventTap, e);
+                CFRelease(e);
+                e = CGEventCreateKeyboardEvent(es, (CGKeyCode)vk, 0);
+                CGEventPost(kCGAnnotatedSessionEventTap, e);
+                CFRelease(e);
+                CFRelease(es);
+            }
+            if (c == 71) {
+                vk = MACVK_Home;
+                es = CGEventSourceCreate(kCGEventSourceStateCombinedSessionState);
+                e = CGEventCreateKeyboardEvent(es, (CGKeyCode)vk, 1);
+                CGEventPost(kCGAnnotatedSessionEventTap, e);
+                CFRelease(e);
+                e = CGEventCreateKeyboardEvent(es, (CGKeyCode)vk, 0);
+                CGEventPost(kCGAnnotatedSessionEventTap, e);
+                CFRelease(e);
+                CFRelease(es);
+            }
+            if (c == 83) {
+                vk = MACVK_ForwardDelete;
+                es = CGEventSourceCreate(kCGEventSourceStateCombinedSessionState);
+                e = CGEventCreateKeyboardEvent(es, (CGKeyCode)vk, 1);
+                CGEventPost(kCGAnnotatedSessionEventTap, e);
+                CFRelease(e);
+                e = CGEventCreateKeyboardEvent(es, (CGKeyCode)vk, 0);
+                CGEventPost(kCGAnnotatedSessionEventTap, e);
+                CFRelease(e);
+                CFRelease(es);
+            }
+            if (c == 79) {
+                vk = MACVK_End;
+                es = CGEventSourceCreate(kCGEventSourceStateCombinedSessionState);
+                e = CGEventCreateKeyboardEvent(es, (CGKeyCode)vk, 1);
+                CGEventPost(kCGAnnotatedSessionEventTap, e);
+                CFRelease(e);
+                e = CGEventCreateKeyboardEvent(es, (CGKeyCode)vk, 0);
+                CGEventPost(kCGAnnotatedSessionEventTap, e);
+                CFRelease(e);
+                CFRelease(es);
+            }
+            if (c == 81) {
+                vk = MACVK_PageDown;
+                es = CGEventSourceCreate(kCGEventSourceStateCombinedSessionState);
+                e = CGEventCreateKeyboardEvent(es, (CGKeyCode)vk, 1);
+                CGEventPost(kCGAnnotatedSessionEventTap, e);
+                CFRelease(e);
+                e = CGEventCreateKeyboardEvent(es, (CGKeyCode)vk, 0);
+                CGEventPost(kCGAnnotatedSessionEventTap, e);
+                CFRelease(e);
+                CFRelease(es);
+            }
+            if (c == 73) {
+                vk = MACVK_PageUp;
+                es = CGEventSourceCreate(kCGEventSourceStateCombinedSessionState);
+                e = CGEventCreateKeyboardEvent(es, (CGKeyCode)vk, 1);
+                CGEventPost(kCGAnnotatedSessionEventTap, e);
+                CFRelease(e);
+                e = CGEventCreateKeyboardEvent(es, (CGKeyCode)vk, 0);
+                CGEventPost(kCGAnnotatedSessionEventTap, e);
+                CFRelease(e);
+                CFRelease(es);
+            }
+            //...
+            // todo: F1-F12, shift/control/alt+above
+            goto special_character;
+        }
+
+        // standard ASCII character output
+        x = ASCII_TO_MACVK[c];
+        if (x & 127) { // available character
+            vk = x >> 8;
+            if (x & 128) {
+                es = CGEventSourceCreate(kCGEventSourceStateCombinedSessionState);
+                e = CGEventCreateKeyboardEvent(es, (CGKeyCode)MACVK_Shift, 1);
+                CGEventPost(kCGAnnotatedSessionEventTap, e);
+                CFRelease(e);
+                e = CGEventCreateKeyboardEvent(es, (CGKeyCode)vk, 1);
+                CGEventSetFlags(e, kCGEventFlagMaskShift);
+                CGEventPost(kCGAnnotatedSessionEventTap, e);
+                CFRelease(e);
+                e = CGEventCreateKeyboardEvent(es, (CGKeyCode)vk, 0);
+                CGEventPost(kCGAnnotatedSessionEventTap, e);
+                CFRelease(e);
+                e = CGEventCreateKeyboardEvent(es, (CGKeyCode)MACVK_Shift, 0);
+                CGEventPost(kCGAnnotatedSessionEventTap, e);
+                CFRelease(e);
+                CFRelease(es);
+            } else {
+                es = CGEventSourceCreate(kCGEventSourceStateCombinedSessionState);
+                e = CGEventCreateKeyboardEvent(es, (CGKeyCode)vk, 1);
+                CGEventPost(kCGAnnotatedSessionEventTap, e);
+                CFRelease(e);
+                e = CGEventCreateKeyboardEvent(es, (CGKeyCode)vk, 0);
+                CGEventPost(kCGAnnotatedSessionEventTap, e);
+                CFRelease(e);
+                CFRelease(es);
+            }
+        } // available character
+
+    special_character:;
+
+    } // i
+
+#endif // QB64_MACOSX
+
+#ifdef QB64_WINDOWS
+
+    static INPUT input;
+
+    /*VK reference:
+        http://msdn.microsoft.com/en-us/library/ms927178.aspx
+    */
+
+    for (i = 0; i < txt->len; i++) {
+        c = txt->chr[i];
+        // custom characters
+        if (c == 9) {
+            ZeroMemory(&input, sizeof(INPUT));
+            input.ki.wVk = VK_TAB;
+            input.type = INPUT_KEYBOARD;
+            SendInput(1, &input, sizeof(INPUT));
+            input.ki.dwFlags = KEYEVENTF_KEYUP;
+            SendInput(1, &input, sizeof(INPUT));
+            goto special_character;
+        }
+        if (c == 8) {
+            ZeroMemory(&input, sizeof(INPUT));
+            input.ki.wVk = VK_BACK;
+            input.type = INPUT_KEYBOARD;
+            SendInput(1, &input, sizeof(INPUT));
+            input.ki.dwFlags = KEYEVENTF_KEYUP;
+            SendInput(1, &input, sizeof(INPUT));
+            goto special_character;
+        }
+        if (c == 13) {
+            ZeroMemory(&input, sizeof(INPUT));
+            input.ki.wVk = VK_RETURN;
+            input.type = INPUT_KEYBOARD;
+            SendInput(1, &input, sizeof(INPUT));
+            input.ki.dwFlags = KEYEVENTF_KEYUP;
+            SendInput(1, &input, sizeof(INPUT));
+            goto special_character;
+        }
+        //...
+
+        /*
+            CONTROL+{A-Z}
+            The following 'x' letters cannot be simulated this way because they map to above functionality:
+            ABCDEFGHIJKLMNOPQRSTUVWXYZ
+            .......xx...x.............
+            Common/standard CTRL+? combinations for copying, pasting, undoing, cutting, etc. are available
+        */
+        if ((c >= 1) && (c <= 26)) {
+            ZeroMemory(&input, sizeof(INPUT));
+            input.type = INPUT_KEYBOARD;
+            input.ki.wVk = VK_CONTROL;
+            SendInput(1, &input, sizeof(INPUT));
+            ZeroMemory(&input, sizeof(INPUT));
+            input.ki.wVk = VkKeyScan(64 + c) & 255;
+            input.type = INPUT_KEYBOARD;
+            SendInput(1, &input, sizeof(INPUT));
+            input.ki.dwFlags = KEYEVENTF_KEYUP;
+            SendInput(1, &input, sizeof(INPUT));
+            ZeroMemory(&input, sizeof(INPUT));
+            input.type = INPUT_KEYBOARD;
+            input.ki.wVk = VK_CONTROL;
+            input.ki.dwFlags = KEYEVENTF_KEYUP;
+            SendInput(1, &input, sizeof(INPUT));
+            goto special_character;
+        }
+
+        // custom extended characters
+        if (c == 0) {
+            if (i == (txt->len - 1))
+                goto special_character;
+            i++;
+            c = txt->chr[i];
+            if (c == 15) { // SHIFT+TAB
+                ZeroMemory(&input, sizeof(INPUT));
+                input.type = INPUT_KEYBOARD;
+                input.ki.wVk = VK_SHIFT;
+                SendInput(1, &input, sizeof(INPUT));
+                ZeroMemory(&input, sizeof(INPUT));
+                input.ki.wVk = VK_TAB;
+                input.type = INPUT_KEYBOARD;
+                SendInput(1, &input, sizeof(INPUT));
+                input.ki.dwFlags = KEYEVENTF_KEYUP;
+                SendInput(1, &input, sizeof(INPUT));
+                ZeroMemory(&input, sizeof(INPUT));
+                input.type = INPUT_KEYBOARD;
+                input.ki.wVk = VK_SHIFT;
+                input.ki.dwFlags = KEYEVENTF_KEYUP;
+                SendInput(1, &input, sizeof(INPUT));
+            }
+            if (c == 75) {
+                ZeroMemory(&input, sizeof(INPUT));
+                input.ki.wVk = VK_LEFT;
+                input.type = INPUT_KEYBOARD;
+                SendInput(1, &input, sizeof(INPUT));
+                input.ki.dwFlags = KEYEVENTF_KEYUP;
+                SendInput(1, &input, sizeof(INPUT));
+            }
+            if (c == 77) {
+                ZeroMemory(&input, sizeof(INPUT));
+                input.ki.wVk = VK_RIGHT;
+                input.type = INPUT_KEYBOARD;
+                SendInput(1, &input, sizeof(INPUT));
+                input.ki.dwFlags = KEYEVENTF_KEYUP;
+                SendInput(1, &input, sizeof(INPUT));
+            }
+            if (c == 72) {
+                ZeroMemory(&input, sizeof(INPUT));
+                input.ki.wVk = VK_UP;
+                input.type = INPUT_KEYBOARD;
+                SendInput(1, &input, sizeof(INPUT));
+                input.ki.dwFlags = KEYEVENTF_KEYUP;
+                SendInput(1, &input, sizeof(INPUT));
+            }
+            if (c == 80) {
+                ZeroMemory(&input, sizeof(INPUT));
+                input.ki.wVk = VK_DOWN;
+                input.type = INPUT_KEYBOARD;
+                SendInput(1, &input, sizeof(INPUT));
+                input.ki.dwFlags = KEYEVENTF_KEYUP;
+                SendInput(1, &input, sizeof(INPUT));
+            }
+            if (c == 82) {
+                ZeroMemory(&input, sizeof(INPUT));
+                input.ki.wVk = VK_INSERT;
+                input.type = INPUT_KEYBOARD;
+                SendInput(1, &input, sizeof(INPUT));
+                input.ki.dwFlags = KEYEVENTF_KEYUP;
+                SendInput(1, &input, sizeof(INPUT));
+            }
+            if (c == 71) {
+                ZeroMemory(&input, sizeof(INPUT));
+                input.ki.wVk = VK_HOME;
+                input.type = INPUT_KEYBOARD;
+                SendInput(1, &input, sizeof(INPUT));
+                input.ki.dwFlags = KEYEVENTF_KEYUP;
+                SendInput(1, &input, sizeof(INPUT));
+            }
+            if (c == 83) {
+                ZeroMemory(&input, sizeof(INPUT));
+                input.ki.wVk = VK_DELETE;
+                input.type = INPUT_KEYBOARD;
+                SendInput(1, &input, sizeof(INPUT));
+                input.ki.dwFlags = KEYEVENTF_KEYUP;
+                SendInput(1, &input, sizeof(INPUT));
+            }
+            if (c == 79) {
+                ZeroMemory(&input, sizeof(INPUT));
+                input.ki.wVk = VK_END;
+                input.type = INPUT_KEYBOARD;
+                SendInput(1, &input, sizeof(INPUT));
+                input.ki.dwFlags = KEYEVENTF_KEYUP;
+                SendInput(1, &input, sizeof(INPUT));
+            }
+            if (c == 81) {
+                ZeroMemory(&input, sizeof(INPUT));
+                input.ki.wVk = VK_NEXT;
+                input.type = INPUT_KEYBOARD;
+                SendInput(1, &input, sizeof(INPUT));
+                input.ki.dwFlags = KEYEVENTF_KEYUP;
+                SendInput(1, &input, sizeof(INPUT));
+            }
+            if (c == 73) {
+                ZeroMemory(&input, sizeof(INPUT));
+                input.ki.wVk = VK_PRIOR;
+                input.type = INPUT_KEYBOARD;
+                SendInput(1, &input, sizeof(INPUT));
+                input.ki.dwFlags = KEYEVENTF_KEYUP;
+                SendInput(1, &input, sizeof(INPUT));
+            }
+            //...
+            // todo: F1-F12, shift/control/alt+above
+
+            goto special_character;
+        }
+
+        if ((c > 126) || (c < 32))
+            goto special_character;
+
+        x = VkKeyScan(txt->chr[i]);
+        vk = x & 255;
+
+        s = (x >> 8) & 255;
+        // 1 Either shift key is pressed.
+        // 2 Either CTRL key is pressed.
+        // 4 Either ALT key is pressed.
+        if (s & 1) {
+            ZeroMemory(&input, sizeof(INPUT));
+            input.type = INPUT_KEYBOARD;
+            input.ki.wVk = VK_SHIFT;
+            SendInput(1, &input, sizeof(INPUT));
+        }
+
+        ZeroMemory(&input, sizeof(INPUT));
+        input.type = INPUT_KEYBOARD;
+        input.ki.wVk = vk;
+        SendInput(1, &input, sizeof(INPUT));
+
+        ZeroMemory(&input, sizeof(INPUT));
+        input.type = INPUT_KEYBOARD;
+        input.ki.wVk = vk;
+        input.ki.dwFlags = KEYEVENTF_KEYUP;
+        SendInput(1, &input, sizeof(INPUT));
+
+        if (s & 1) {
+            ZeroMemory(&input, sizeof(INPUT));
+            input.type = INPUT_KEYBOARD;
+            input.ki.wVk = VK_SHIFT;
+            input.ki.dwFlags = KEYEVENTF_KEYUP;
+            SendInput(1, &input, sizeof(INPUT));
+        }
+
+    special_character:;
+
+    } // i
+
+#endif
+}
+
+#ifndef DEPENDENCY_PRINTER
+
+// stubs
+void sub__printimage(int32 i) { return; }
+
+#else
+
+void sub__printimage(int32 i) {
+
+#    ifdef QB64_WINDOWS
+
+    static LPSTR szPrinterName = NULL;
+    DWORD dwNameLen;
+    HDC dc;
+    DOCINFO di;
+    uint32 w, h;
+    int32 x, y;
+    int32 i2;
+    BITMAPFILEHEADER bmfHeader;
+    BITMAPINFOHEADER bi;
+    img_struct *s, *s2;
+
+    if (i >= 0) {
+        validatepage(i);
+        s = &img[page[i]];
+    } else {
+        x = -i;
+        if (x >= nextimg) {
+            error(258);
+            return;
+        }
+        s = &img[x];
+        if (!s->valid) {
+            error(258);
+            return;
+        }
+    }
+
+    if (!szPrinterName)
+        szPrinterName = (LPSTR)malloc(65536);
+    dwNameLen = 65536;
+    GetDefaultPrinter(szPrinterName, &dwNameLen);
+    if ((dc = CreateDC(TEXT("WINSPOOL"), szPrinterName, NULL, NULL)) == NULL)
+        goto failed;
+    ZeroMemory(&di, sizeof(DOCINFO));
+    di.cbSize = sizeof(DOCINFO);
+    di.lpszDocName = TEXT("Document");
+    if (StartDoc(dc, &di) <= 0) {
+        DeleteDC(dc);
+        goto failed;
+    }
+    if (StartPage(dc) <= 0) {
+        EndDoc(dc);
+        DeleteDC(dc);
+        goto failed;
+    }
+
+    w = GetDeviceCaps(dc, HORZRES);
+    h = GetDeviceCaps(dc, VERTRES);
+
+    i2 = func__newimage(w, h, 32, 1);
+    if (i2 == -1) {
+        EndDoc(dc);
+        DeleteDC(dc);
+        goto failed;
+    }
+    s2 = &img[-i2];
+    sub__dontblend(i2, 1);
+    sub__putimage(NULL, NULL, NULL, NULL, i, i2, NULL, NULL, NULL, NULL, 8 + 32);
+
+    ZeroMemory(&bi, sizeof(BITMAPINFOHEADER));
+
+    bi.biSize = sizeof(BITMAPINFOHEADER);
+    bi.biWidth = w;
+    bi.biHeight = h;
+    bi.biPlanes = 1;
+    bi.biBitCount = 32;
+    bi.biCompression = BI_RGB;
+    bi.biSizeImage = 0;
+    bi.biXPelsPerMeter = 0;
+    bi.biYPelsPerMeter = 0;
+    bi.biClrUsed = 0;
+    bi.biClrImportant = 0;
+
+    for (y = 0; y < h; y++) {
+        SetDIBitsToDevice(dc, 0, y, w, 1, 0, 0, 0, 1, s2->offset32 + (y * w), (BITMAPINFO *)&bi, DIB_RGB_COLORS);
+    }
+
+    sub__freeimage(i2, 1);
+
+    if (EndPage(dc) <= 0) {
+        EndDoc(dc);
+        DeleteDC(dc);
+        goto failed;
+    }
+    if (EndDoc(dc) <= 0) {
+        DeleteDC(dc);
+        goto failed;
+    }
+    DeleteDC(dc);
+failed:;
+#    endif
+}
+
+#endif
+
+void sub_files(qbs *str, int32 passed) {
+    if (new_error)
+        return;
+
+    static int32 i, i2, i3;
+    static qbs *strz = NULL;
+    if (!strz)
+        strz = qbs_new(0, 0);
+
+    if (passed) {
+        qbs_set(strz, qbs_add(str, qbs_new_txt_len("\0", 1)));
+    } else {
+        qbs_set(strz, qbs_new_txt_len("\0", 1));
+    }
+
+#ifdef QB64_WINDOWS
+    static WIN32_FIND_DATA fd;
+    static HANDLE hFind;
+    static qbs *strpath = NULL;
+    if (!strpath)
+        strpath = qbs_new(0, 0);
+    static qbs *strz2 = NULL;
+    if (!strz2)
+        strz2 = qbs_new(0, 0);
+
+    i = 0;
+    if (strz->len >= 2) {
+        if (strz->chr[strz->len - 2] == 92)
+            i = 1;
+    } else
+        i = 1;
+    if (i) {                           // add * (and new NULL term.)
+        strz->chr[strz->len - 1] = 42; //"*"
+        qbs_set(strz, qbs_add(strz, qbs_new_txt_len("\0", 1)));
+    }
+
+    qbs_set(strpath, strz);
+
+    for (i = strpath->len; i > 0; i--) {
+        if ((strpath->chr[i - 1] == 47) || (strpath->chr[i - 1] == 92)) {
+            strpath->len = i;
+            break;
+        }
+    } // i
+    if (i == 0)
+        strpath->len = 0; // no path specified
+
+    // print the current path
+    // note: for QBASIC compatibility reasons it does not print the directory name of the files being displayed
+    static uint8 curdir[4096];
+    static uint8 curdir2[4096];
+    i2 = GetCurrentDirectory(4096, (char *)curdir);
+    if (i2) {
+        i2 = GetShortPathName((char *)curdir, (char *)curdir2, 4096);
+        if (i2) {
+            qbs_set(strz2, qbs_ucase(qbs_new_txt_len((char *)curdir2, i2)));
+            qbs_print(strz2, 1);
+        } else {
+            error(5);
+            return;
+        }
+    } else {
+        error(5);
+        return;
+    }
+
+    hFind = FindFirstFile(fixdir(strz), &fd);
+    if (hFind == INVALID_HANDLE_VALUE) {
+        error(53);
+        return;
+    } // file not found
+    do {
+
+        if (!fd.cAlternateFileName[0]) { // no alternate filename exists
+            qbs_set(strz2, qbs_ucase(qbs_new_txt_len(fd.cFileName, strlen(fd.cFileName))));
+        } else {
+            qbs_set(strz2, qbs_ucase(qbs_new_txt_len(fd.cAlternateFileName, strlen(fd.cAlternateFileName))));
+        }
+
+        if (strz2->len < 12) { // padding required
+            qbs_set(strz2, qbs_add(strz2, func_space(12 - strz2->len)));
+            i2 = 0;
+            for (i = 0; i < 12; i++) {
+                if (strz2->chr[i] == 46) {
+                    memmove(&strz2->chr[8], &strz2->chr[i], 4);
+                    memset(&strz2->chr[i], 32, 8 - i);
+                    break;
+                }
+            } // i
+        }     // padding
+
+        // add "      " or "<DIR> "
+        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
+            qbs_set(strz2, qbs_add(strz2, qbs_new_txt_len("<DIR> ", 6)));
+        } else {
+            qbs_set(strz2, qbs_add(strz2, func_space(6)));
+        }
+
+        makefit(strz2);
+        qbs_print(strz2, 0);
+
+    } while (FindNextFile(hFind, &fd));
+    FindClose(hFind);
+
+    static ULARGE_INTEGER FreeBytesAvailableToCaller;
+    static ULARGE_INTEGER TotalNumberOfBytes;
+    static ULARGE_INTEGER TotalNumberOfFreeBytes;
+    static int64 bytes;
+    static char *cp;
+    qbs_set(strpath, qbs_add(strpath, qbs_new_txt_len("\0", 1)));
+    cp = (char *)strpath->chr;
+    if (strpath->len == 1)
+        cp = NULL;
+    if (GetDiskFreeSpaceEx(cp, &FreeBytesAvailableToCaller, &TotalNumberOfBytes, &TotalNumberOfFreeBytes)) {
+        bytes = *(int64 *)(void *)&FreeBytesAvailableToCaller;
+    } else {
+        bytes = 0;
+    }
+    if (func_pos(NULL) > 1) {
+        strz2->len = 0;
+        qbs_print(strz2, 1);
+    } // new line if necessary
+    qbs_set(strz2, qbs_add(qbs_str(bytes), qbs_new_txt_len(" Bytes free", 11)));
+    qbs_print(strz2, 1);
+
+#endif
+}
+
+int32 func__keyhit() {
+    /*
+        //keyhit cyclic buffer
+        int64 keyhit[8192];
+        //    keyhit specific internal flags: (stored in high 32-bits)
+        //    &4294967296->numpad was used
+        int32 keyhit_nextfree=0;
+        int32 keyhit_next=0;
+        //note: if full, the oldest message is discarded to make way for the new message
+    */
+    if (keyhit_next != keyhit_nextfree) {
+        static int32 x;
+        x = *(int32 *)&keyhit[keyhit_next];
+        keyhit_next = (keyhit_next + 1) & 0x1FFF;
+        return x;
+    }
+    return 0;
+}
+
+int32 func__keydown(int32 x) {
+    if (x <= 0) {
+        error(5);
+        return 0;
+    }
+    if (keyheld(x))
+        return -1;
+    return 0;
+}
+
+static int32 field_failed = 1;
+static int32 field_fileno;
+static int32 field_totalsize;
+static int32 field_maxsize;
+
+void field_new(int32 fileno) {
+    field_failed = 1;
+    if (new_error)
+        return;
+    // validate file
+    static int32 i;
+    static gfs_file_struct *gfs;
+    i = fileno;
+    if (i < 0) {
+        error(54);
+        return;
+    } // bad file mode (TCP/IP exclusion)
+    if (gfs_fileno_valid(i) != 1) {
+        error(52);
+        return;
+    }                  // Bad file name or number
+    i = gfs_fileno[i]; // convert fileno to gfs index
+    gfs = &gfs_file[i];
+    if (gfs->type != 1) {
+        error(54);
+        return;
+    } // Bad file mode (note: must have RANDOM access)
+    // set global variables for field_add
+    field_fileno = fileno;
+    field_totalsize = 0;
+    field_maxsize = gfs->record_length;
+    field_failed = 0;
+    return;
+}
+
+void field_update(int32 fileno) {
+
+    // validate file
+    static int32 i;
+    static gfs_file_struct *gfs;
+    i = fileno;
+    if (i < 0) {
+        exit(7701);
+    } // bad file mode (TCP/IP exclusion)
+    if (gfs_fileno_valid(i) != 1) {
+        exit(7702);
+    }                  // Bad file name or number
+    i = gfs_fileno[i]; // convert fileno to gfs index
+    gfs = &gfs_file[i];
+    if (gfs->type != 1) {
+        exit(7703);
+    } // Bad file mode (note: must have RANDOM access)
+
+    static qbs *str;
+    for (i = 0; i < gfs->field_strings_n; i++) {
+        str = gfs->field_strings[i];
+        if (!str)
+            exit(7704);
+
+        // fix length if necessary
+        if (str->len != str->field->size) {
+            if (str->len > str->field->size)
+                str->len = str->field->size;
+            else
+                qbs_set(str, qbs_new(str->field->size, 1));
+        }
+
+        // copy data from field into string
+        memmove(str->chr, gfs->field_buffer + str->field->offset, str->field->size);
+
+    } // i
+}
+
+void lrset_field(qbs *str) {
+    // validate file
+    static int32 i;
+    static gfs_file_struct *gfs;
+    i = str->field->fileno;
+    if (gfs_fileno_valid(i) != 1)
+        goto remove;
+    i = gfs_fileno[i]; // convert fileno to gfs index
+
+    gfs = &gfs_file[i];
+    if (gfs->type != 1)
+        goto remove;
+    // check file ID
+    if (gfs->id != str->field->fileid)
+        goto remove;
+
+    // store in field buffer, padding with spaces or truncating data if necessary
+    if (str->field->size <= str->len) {
+
+        memmove(gfs->field_buffer + str->field->offset, str->chr, str->field->size);
+    } else {
+        memmove(gfs->field_buffer + str->field->offset, str->chr, str->len);
+        memset(gfs->field_buffer + str->field->offset + str->len, 32, str->field->size - str->len);
+    }
+
+    // update field strings for this file
+    field_update(str->field->fileno);
+
+    return;
+remove:;
+    free(str->field);
+    str->field = NULL;
+}
+
+void field_free(qbs *str) {
+
+    // validate file
+    static int32 i;
+    static gfs_file_struct *gfs;
+    i = str->field->fileno;
+    if (gfs_fileno_valid(i) != 1)
+        goto remove;
+    i = gfs_fileno[i]; // convert fileno to gfs index
+    gfs = &gfs_file[i];
+    if (gfs->type != 1)
+        goto remove;
+    // check file ID
+    if (gfs->id != str->field->fileid)
+        goto remove;
+
+    // remove from string list
+    static qbs *str2;
+    for (i = 0; i < gfs->field_strings_n; i++) {
+        str2 = gfs->field_strings[i];
+        if (str == str2) { // match found
+            // truncate list
+            memmove(&(gfs->field_strings[i]), &(gfs->field_strings[i + 1]), (gfs->field_strings_n - i - 1) * ptrsz);
+            goto remove;
+        }
+    } // i
+
+remove:
+    free(str->field);
+    str->field = NULL;
+}
+
+void field_add(qbs *str, int64 size) {
+    if (field_failed)
+        return;
+    if (new_error)
+        goto fail;
+    if (size < 0) {
+        error(5);
+        goto fail;
+    }
+    if ((field_totalsize + size) > field_maxsize) {
+        error(50);
+        goto fail;
+    }
+
+    // revalidate file
+    static int32 i;
+    static gfs_file_struct *gfs;
+    i = field_fileno;
+    // TCP/IP exclusion (reason: multi-reading from same TCP/IP position would require a more complex implementation)
+    if (i < 0) {
+        error(54);
+        goto fail;
+    } // bad file mode
+    if (gfs_fileno_valid(i) != 1) {
+        error(52);
+        goto fail;
+    }                  // Bad file name or number
+    i = gfs_fileno[i]; // convert fileno to gfs index
+    gfs = &gfs_file[i];
+    if (gfs->type != 1) {
+        error(54);
+        goto fail;
+    } // Bad file mode (note: must have RANDOM access)
+
+    // 1) Remove str from any previous FIELD allocations
+    if (str->field)
+        field_free(str);
+
+    // 2) Setup qbs field info
+    str->field = (qbs_field *)malloc(sizeof(qbs_field));
+    str->field->fileno = field_fileno;
+    str->field->fileid = gfs->id;
+    str->field->size = size;
+    str->field->offset = field_totalsize;
+
+    // 3) Add str to qbs list of gfs
+    if (!gfs->field_strings) {
+        gfs->field_strings_n = 1;
+        gfs->field_strings = (qbs **)malloc(ptrsz);
+        gfs->field_strings[0] = str;
+    } else {
+        gfs->field_strings_n++;
+        gfs->field_strings = (qbs **)realloc(gfs->field_strings, ptrsz * gfs->field_strings_n);
+        gfs->field_strings[gfs->field_strings_n - 1] = str;
+    }
+
+    // 4) Update field strings for this file
+    field_update(field_fileno);
+
+    field_totalsize += size;
+    return;
+fail:
+    field_failed = 1;
+    return;
+}
+
+void field_get(int32 fileno, int64 offset, int32 passed) {
+    if (new_error)
+        return;
+
+    // validate file
+    static int32 i;
+    static gfs_file_struct *gfs;
+    i = fileno;
+    if (i < 0) {
+        error(54);
+        return;
+    } // bad file mode (TCP/IP exclusion)
+    if (gfs_fileno_valid(i) != 1) {
+        error(52);
+        return;
+    }                  // Bad file name or number
+    i = gfs_fileno[i]; // convert fileno to gfs index
+    gfs = &gfs_file[i];
+    if (gfs->type != 1) {
+        error(54);
+        return;
+    } // Bad file mode (note: must have RANDOM access)
+
+    if (!gfs->read) {
+        error(75);
+        return;
+    } // Path/file access error
+
+    if (passed) {
+        offset--;
+        if (offset < 0) {
+            error(63);
+            return;
+        } // Bad record number
+        offset *= gfs->record_length;
+    } else {
+        offset = -1;
+    }
+
+    static int32 e;
+    e = gfs_read(i, offset, gfs->field_buffer, gfs->record_length);
+    if (e) {
+        if (e != -10) { // note: on eof, unread buffer area becomes NULL
+            if (e == -2) {
+                error(258);
+                return;
+            } // invalid handle
+            if (e == -3) {
+                error(54);
+                return;
+            } // bad file mode
+            if (e == -4) {
+                error(5);
+                return;
+            } // illegal function call
+            if (e == -7) {
+                error(70);
+                return;
+            } // permission denied
+            error(75);
+            return; // assume[-9]: path/file access error
+        }
+    }
+
+    field_update(fileno);
+}
+
+void field_put(int32 fileno, int64 offset, int32 passed) {
+    if (new_error)
+        return;
+
+    // validate file
+    static int32 i;
+    static gfs_file_struct *gfs;
+    i = fileno;
+    if (i < 0) {
+        error(54);
+        return;
+    } // bad file mode (TCP/IP exclusion)
+    if (gfs_fileno_valid(i) != 1) {
+        error(52);
+        return;
+    }                  // Bad file name or number
+    i = gfs_fileno[i]; // convert fileno to gfs index
+    gfs = &gfs_file[i];
+    if (gfs->type != 1) {
+        error(54);
+        return;
+    } // Bad file mode (note: must have RANDOM access)
+
+    if (!gfs->write) {
+        error(75);
+        return;
+    } // Path/file access error
+
+    if (passed) {
+        offset--;
+        if (offset < 0) {
+            error(63);
+            return;
+        } // Bad record number
+        offset *= gfs->record_length;
+    } else {
+        offset = -1;
+    }
+
+    static int32 e;
+    e = gfs_write(i, offset, gfs->field_buffer, gfs->record_length);
+    if (e) {
+        if (e == -2) {
+            error(258);
+            return;
+        } // invalid handle
+        if (e == -3) {
+            error(54);
+            return;
+        } // bad file mode
+        if (e == -4) {
+            error(5);
+            return;
+        } // illegal function call
+        if (e == -7) {
+            error(70);
+            return;
+        } // permission denied
+        error(75);
+        return; // assume[-9]: path/file access error
+    }
+}
+
+void sub__mapunicode(int32 unicode_code, int32 ascii_code) {
+    if (new_error)
+        return;
+    if ((unicode_code < 0) || (unicode_code > 65535)) {
+        error(5);
+        return;
+    }
+    if ((ascii_code < 0) || (ascii_code > 255)) {
+        error(5);
+        return;
+    }
+    codepage437_to_unicode16[ascii_code] = unicode_code;
+}
+
+int32 func__mapunicode(int32 ascii_code) {
+    if (new_error)
+        return NULL;
+    if ((ascii_code < 0) || (ascii_code > 255)) {
+        error(5);
+        return NULL;
+    }
+    return (codepage437_to_unicode16[ascii_code]);
+}
+
+int32 addone(int32 x) { return x + 1; } // for testing purposes only
+
+qbs *func__os() {
+    qbs *tqbs;
+#ifdef QB64_WINDOWS
+#    ifdef QB64_32
+    tqbs = qbs_new_txt("[WINDOWS][32BIT]");
+#    else
+    tqbs = qbs_new_txt("[WINDOWS][64BIT]");
+#    endif
+#elif defined(QB64_LINUX)
+#    ifdef QB64_32
+    tqbs = qbs_new_txt("[LINUX][32BIT]");
+#    else
+    tqbs = qbs_new_txt("[LINUX][64BIT]");
+#    endif
+#elif defined(QB64_MACOSX)
+#    ifdef QB64_32
+    tqbs = qbs_new_txt("[MACOSX][32BIT][LINUX]");
+#    else
+    tqbs = qbs_new_txt("[MACOSX][64BIT][LINUX]");
+#    endif
+#else
+#    ifdef QB64_32
+    tqbs = qbs_new_txt("[32BIT]");
+#    else
+    tqbs = qbs_new_txt("[64BIT]");
+#    endif
+#endif
+    return tqbs;
+}
+
+int32 func__screenx() {
+#if defined(QB64_GUI) && defined(QB64_WINDOWS) && defined(QB64_GLUT)
+    while (!window_exists) {
+        Sleep(100);
+    } // Wait for window to be created before checking position
+    return glutGet(GLUT_WINDOW_X) - glutGet(GLUT_WINDOW_BORDER_WIDTH);
+#elif defined(QB64_GUI) && defined(QB64_MACOSX) && defined(QB64_GLUT)
+    while (!window_exists) {
+        Sleep(100);
+    } // Wait for window to be created before checking position
+    return glutGet(GLUT_WINDOW_X);
+#endif
+    return 0; // if not windows then return 0
+}
+
+int32 func__screeny() {
+#if defined(QB64_GUI) && defined(QB64_WINDOWS) && defined(QB64_GLUT)
+    while (!window_exists) {
+        Sleep(100);
+    } // Wait for window to be created before checking position
+    return glutGet(GLUT_WINDOW_Y) - glutGet(GLUT_WINDOW_BORDER_WIDTH) - glutGet(GLUT_WINDOW_HEADER_HEIGHT);
+#elif defined(QB64_GUI) && defined(QB64_MACOSX) && defined(QB64_GLUT)
+    while (!window_exists) {
+        Sleep(100);
+    } // Wait for window to be created before checking position
+    return glutGet(GLUT_WINDOW_Y);
+#endif
+    return 0; // if not windows then return 0
+}
+
+void sub__screenmove(int32 x, int32 y, int32 passed) {
+    if (new_error)
+        return;
+    if (!passed)
+        goto error;
+    if (passed == 3)
+        goto error;
+    if (full_screen)
+        return;
+
+#if defined(QB64_GUI) && defined(QB64_GLUT)
+    while (!window_exists) {
+        Sleep(100);
+    } // wait for window to be created before moving it.
+    if (passed == 2) {
+        glutPositionWindow(x, y);
+    } else {
+        int32 SW = -1, SH, WW, WH;
+        while (SW == -1) {
+            SW = glutGet(GLUT_SCREEN_WIDTH);
+        }
+        SH = glutGet(GLUT_SCREEN_HEIGHT);
+        WW = glutGet(GLUT_WINDOW_WIDTH);
+        WH = glutGet(GLUT_WINDOW_HEIGHT);
+        x = (SW - WW) / 2;
+        y = (SH - WH) / 2;
+        glutPositionWindow(x, y);
+    }
+#endif
+
+    return;
+
+error:
+    error(5);
+}
+
+void key_update() {
+
+    if (key_display_redraw) {
+        key_display_redraw = 0;
+        if (!key_display)
+            return;
+    } else {
+        if (key_display == key_display_state)
+            return;
+        key_display_state = key_display;
+    }
+
+    // use display page 0
+    static int32 olddest;
+    olddest = func__dest();
+    sub__dest(0);
+    static img_struct *i;
+    i = write_page;
+
+    static int32 f, z, c, x2;
+
+    // locate bottom-left
+    // get current status
+    static int32 cx, cy, holding, col1, col2;
+    cx = i->cursor_x;
+    cy = i->cursor_y;
+    holding = i->holding_cursor;
+    col1 = i->color;
+    col2 = i->background_color;
+    static int32 h, w;
+    // calculate height & width in characters
+    if (i->compatible_mode) {
+        h = i->height / fontheight[i->font];
+        if (fontwidth[i->font]) {
+            w = i->width / fontwidth[i->font];
+        } else {
+            w = write_page->width;
+        }
+    } else {
+        h = i->height;
+        w = i->width;
+    }
+    i->cursor_x = 1;
+    i->cursor_y = h;
+    i->holding_cursor = 0;
+
+    static qbs *str = NULL;
+    if (!str)
+        str = qbs_new(0, 0);
+    static qbs *str2 = NULL;
+    if (!str2)
+        str2 = qbs_new(1, 0);
+
+    // clear bottom row using background color
+    if (i->text) {
+        for (x2 = 1; x2 <= i->width; x2++) {
+            str2->chr[0] = 32;
+            qbs_print(str2, 0);
+        }
+        i->cursor_x = 1;
+        i->cursor_y = h;
+        i->holding_cursor = 0;
+    } else {
+        fast_boxfill(0, (i->cursor_y - 1) * fontheight[i->font], i->width - 1, i->cursor_y * fontheight[i->font] - 1, col2 | 0xFF000000);
+    }
+
+    if (!key_display)
+        goto no_key;
+
+    static int32 item_x, limit_x, row_limit, leeway_x;
+    leeway_x = 0;
+    if (i->compatible_mode) {
+        if (fontwidth[i->font]) {
+            item_x = w / 12;
+            row_limit = item_x * 12;
+            if (item_x < 8) { // cannot fit min. width
+                item_x = 8;
+                row_limit = (w / 8) * 8;
+                if (item_x > w) {
+                    item_x = w;
+                    row_limit = w;
+                } // can't even fit 1!
+            }
+        } else {
+            leeway_x = fontheight[i->font];
+            item_x = w / 12;
+            row_limit = item_x * 12 - leeway_x;
+            x2 = ((float)fontheight[i->font]) * 0.5; // estimate the average character width (it's OK for this to be wrong)
+            if (item_x < (x2 * 8 + leeway_x)) {      // cannot fit min. width
+                item_x = (x2 * 8 + leeway_x);
+                row_limit = (w / (x2 * 8 + leeway_x)) * (x2 * 8 + leeway_x) - leeway_x;
+                if (item_x > w) {
+                    item_x = w;
+                    row_limit = w - leeway_x;
+                } // can't even fit 1!
+            }
+        }
+    } else {
+        item_x = w / 12;
+        row_limit = item_x * 12;
+        if (item_x < 8) { // cannot fit min. width
+            item_x = 8;
+            row_limit = (w / 8) * 8;
+            if (item_x > w) {
+                item_x = w;
+                row_limit = w;
+            } // can't even fit 1!
+        }
+    }
+
+    static int32 final_chr, row_final_chr;
+
+    row_final_chr = 0;
+    for (f = 1; f <= 12; f++) {
+        final_chr = 0;
+        limit_x = f * item_x - leeway_x; // set new limit
+
+        // relocate
+        x2 = ((f - 1) * item_x) + 1;
+        if (x2 >= row_limit) {
+            row_final_chr = 1;
+            goto done_f;
+        }
+        i->cursor_x = x2;
+
+        // number string
+        if (fontwidth[i->font]) {
+            qbs_set(str, qbs_ltrim(qbs_str(f)));
+        } else {
+            qbs_set(str, qbs_add(qbs_ltrim(qbs_str(f)), qbs_new_txt(")")));
+        }
+        for (z = 0; z < str->len; z++) {
+            if (i->cursor_x >= row_limit)
+                row_final_chr = 1;
+            if (i->cursor_x > limit_x)
+                goto done_f;
+            if (i->cursor_x >= limit_x)
+                final_chr = 1;
+            str2->chr[0] = str->chr[z];
+            qbs_print(str2, 0);
+            if (final_chr)
+                goto done_f;
+        }
+
+        // text
+        static int32 fi;
+        fi = f;
+        if (f > 10)
+            fi = f - 11 + 30;
+        if (onkey[fi].text) {
+            qbs_set(str, onkey[fi].text);
+            if (i->text) {
+                if (i->background_color) {
+                    i->color = 7;
+                    i->background_color = 0;
+                } else {
+                    i->color = 0;
+                    i->background_color = 7;
+                }
+            }
+        } else {
+            str->len = 0;
+        }
+        z = 0;
+        while (i->cursor_x < limit_x) {
+            static int32 c;
+
+            if (z >= str->len) {
+                if (!onkey[fi].text)
+                    goto done_f;
+                c = 32;
+            } else {
+                c = str->chr[z++];
+            }
+
+            if (i->cursor_x >= row_limit)
+                row_final_chr = 1;
+            if (i->cursor_x > limit_x)
+                goto done_f;
+            if (i->cursor_x >= limit_x)
+                final_chr = 1;
+            /*
+                7->14
+                8->254
+                9->26
+                10->60
+                11->127
+                12->22
+                13->27
+                28->16
+                29->17
+                30->24
+                31->25
+                KEY LIST puts spaces instead of non-printables
+                QBASIC's KEY LIST differs from QBX in this regard
+                CHR$(13) is also turned into a space in KEY LIST, even if it is at the end
+            */
+            if (c == 7)
+                c = 14;
+            if (c == 8)
+                c = 254;
+            if (c == 9)
+                c = 26;
+            if (c == 10)
+                c = 60;
+            if (c == 11)
+                c = 127;
+            if (c == 12)
+                c = 22;
+            if (c == 13)
+                c = 27;
+            if (c == 28)
+                c = 16;
+            if (c == 29)
+                c = 17;
+            if (c == 30)
+                c = 24;
+            if (c == 31)
+                c = 25;
+            str2->chr[0] = c;
+            no_control_characters = 1;
+            qbs_print(str2, 0);
+            no_control_characters = 0;
+            if (final_chr)
+                goto done_f;
+        }
+
+    done_f:;
+        i->color = col1;
+        i->background_color = col2;
+        if (row_final_chr)
+            goto done_row;
+    }
+done_row:;
+
+// revert status
+no_key:
+    i->cursor_x = cx;
+    i->cursor_y = cy;
+    i->holding_cursor = holding;
+    i->color = col1;
+    i->background_color = col2;
+    sub__dest(olddest);
+}
+
+void key_on() {
+    key_display = 1;
+    key_update();
+}
+
+void key_off() {
+    key_display = 0;
+    key_update();
+}
+
+void key_list() {
+    static img_struct *i;
+    i = write_page;
+    static int32 mono;
+    mono = 1;
+    if (!fontwidth[i->font])
+        if (func__printwidth(qbs_new_txt(" "), NULL, NULL) != func__printwidth(qbs_new_txt(")"), NULL, NULL))
+            mono = 0;
+    static int32 f, fi;
+    static qbs *str = NULL;
+    if (!str)
+        str = qbs_new(0, 0);
+    for (f = 1; f <= 12; f++) {
+
+        // F-number & spacer
+        if (fontwidth[i->font]) {
+            if (f < 10) {
+                qbs_set(str, qbs_add(qbs_ltrim(qbs_str(f)), qbs_new_txt("  ")));
+            } else {
+                qbs_set(str, qbs_add(qbs_ltrim(qbs_str(f)), qbs_new_txt(" ")));
+            }
+        } else {
+            if ((f < 10) && (mono == 1)) {
+                qbs_set(str, qbs_add(qbs_ltrim(qbs_str(f)), qbs_new_txt(")  ")));
+            } else {
+                qbs_set(str, qbs_add(qbs_ltrim(qbs_str(f)), qbs_new_txt(") ")));
+            }
+        }
+        qbs_set(str, qbs_add(qbs_new_txt("F"), str));
+
+        // text
+        fi = f;
+        if (f > 10)
+            fi = f - 11 + 30;
+        if (onkey[fi].text) {
+            qbs_print(str, 0);
+            /*
+                7->14
+                8->254
+                9->26
+                10->60
+                11->127
+                12->22
+                13->27
+                28->16
+                29->17
+                30->24
+                31->25
+                KEY LIST puts spaces instead of non-printables
+                QBASIC's KEY LIST differs from QBX in this regard
+                CHR$(13) is also turned into a space in KEY LIST, even if it is at the end
+            */
+            str->len = 1;
+            static int32 x, c;
+            for (x = 0; x < onkey[fi].text->len; x++) {
+                c = onkey[fi].text->chr[x];
+                if ((c >= 7) && (c <= 13))
+                    c = 32;
+                if ((c >= 28) && (c <= 31))
+                    c = 32;
+                str->chr[0] = c;
+                qbs_print(str, 0);
+            }
+            str->len = 0;
+            qbs_print(str, 1);
+        } else {
+            qbs_print(str, 1);
+        }
+
+    } // f
+}
+
+void key_assign(int32 i, qbs *str) {
+    if (new_error)
+        return;
+    static int32 x, x2, i2;
+
+    if (((i >= 1) && (i <= 10)) || (i == 30) || (i == 31)) { // F1-F10,F11,F12
+        if (str->len > 15) {
+            error(5);
+            return;
+        }
+        if (!onkey[i].text)
+            onkey[i].text = qbs_new(0, 0);
+        qbs_set(onkey[i].text, str);
+        key_display_redraw = 1;
+        key_update();
+        return;
+    } // F1-F10,F11,F12
+
+    if ((i >= 15) && (i <= 29)) { // user defined key
+        if (str->len == 0) {
+            onkey[i].key_scancode = 0;
+        } else {
+            x = str->chr[str->len - 1];
+            x2 = 0;
+            for (i2 = 0; i2 < str->len - 1; i2++)
+                x2 |= str->chr[i2];
+            onkey[i].key_scancode = x;
+            onkey[i].key_flags = x2;
+        }
+        return;
+    } // user defined key
+
+    error(5);
+    return;
+}
+
+void sub_paletteusing(void *element, int32 bits) {
+    // note: bits is either 16(INTEGER) or 32(LONG)
+    if (new_error)
+        return;
+    static byte_element_struct *ele;
+    ele = (byte_element_struct *)element;
+    static int16 *i16;
+    i16 = (int16 *)ele->offset;
+    static int32 *i32;
+    i32 = (int32 *)ele->offset;
+    if (write_page->bits_per_pixel == 32)
+        goto error;
+    static int32 last_color, i, c;
+    last_color = write_page->mask;
+    if (ele->length < ((bits / 8) * (last_color + 1)))
+        goto error;
+    if ((write_page->compatible_mode == 11) || (write_page->compatible_mode == 12) || (write_page->compatible_mode == 13) ||
+        (write_page->compatible_mode == 256)) {
+        if (bits == 16)
+            goto error; // must be an array of type LONG in these modes
+    }
+    for (i = 0; i <= last_color; i++) {
+        if (bits == 16) {
+            c = *i16;
+            i16++;
+        } else {
+            c = *i32;
+            i32++;
+        }
+        if (c < -1)
+            goto error;
+        if (c != -1) {
+            qbg_palette(i, c, 1);
+            if (new_error)
+                return;
+        }
+    }
+    return;
+error:
+
+    error(5);
+}
+
+void sub__depthbuffer(int32 options, int32 dst, int32 passed) {
+    //                    {ON|OFF|LOCK|_CLEAR}
+
+    if (new_error)
+        return;
+
+    if ((passed & 1) == 0)
+        dst = 0; // the primary hardware surface is implied
+    hardware_img_struct *dst_himg = NULL;
+    if (dst < 0) {
+        dst_himg = (hardware_img_struct *)list_get(hardware_img_handles, dst - HARDWARE_IMG_HANDLE_OFFSET);
+        if (dst_himg == NULL) {
+            error(258);
+            return;
+        }
+        dst -= HARDWARE_IMG_HANDLE_OFFSET;
+    } else {
+        if (dst > 1) {
+            error(5);
+            return;
+        }
+        dst = -dst;
+    }
+
+    if (options == 4) {
+        flush_old_hardware_commands();
+        int32 hgch = list_add(hardware_graphics_command_handles);
+        hardware_graphics_command_struct *hgc = (hardware_graphics_command_struct *)list_get(hardware_graphics_command_handles, hgch);
+        hgc->remove = 0;
+        // set command values
+        hgc->command = HARDWARE_GRAPHICS_COMMAND__CLEAR_DEPTHBUFFER;
+        hgc->dst_img = dst;
+        // queue the command
+        hgc->next_command = 0;
+        hgc->order = display_frame_order_next;
+        if (last_hardware_command_added) {
+            hardware_graphics_command_struct *hgc2 =
+                (hardware_graphics_command_struct *)list_get(hardware_graphics_command_handles, last_hardware_command_added);
+            hgc2->next_command = hgch;
+        }
+        last_hardware_command_added = hgch;
+        if (first_hardware_command == 0)
+            first_hardware_command = hgch;
+        return;
+    }
+
+    int32 new_mode;
+    if (options == 1) {
+        new_mode = DEPTHBUFFER_MODE__ON;
+    }
+    if (options == 2) {
+        new_mode = DEPTHBUFFER_MODE__OFF;
+    }
+    if (options == 3) {
+        new_mode = DEPTHBUFFER_MODE__LOCKED;
+    }
+
+    if (dst == 0) {
+        depthbuffer_mode0 = new_mode;
+        return;
+    }
+    if (dst == -1) {
+        depthbuffer_mode1 = new_mode;
+        return;
+    }
+    dst_himg->depthbuffer_mode = new_mode;
+}
+
+void sub__maptriangle(int32 cull_options, float sx1, float sy1, float sx2, float sy2, float sx3, float sy3, int32 si, float fdx1, float fdy1, float fdz1,
+                      float fdx2, float fdy2, float fdz2, float fdx3, float fdy3, float fdz3, int32 di, int32 smooth_options, int32 passed) {
+    //[{_CLOCKWISE|_ANTICLOCKWISE}][{_SEAMLESS}](?,?)-(?,?)-(?,?)[,?]{TO}(?,?[,?])-(?,?[,?])-(?,?[,?])[,[?][,{_SMOOTH|_SMOOTHSHRUNK|_SMOOTHSTRETCHED}]]"
+    //  (1)       (2)              1                             2           4         8         16    32   (1)     (2)           (3)
+
+    if (new_error)
+        return;
+
+    static int32 dwidth, dheight, swidth, sheight, swidth2, sheight2;
+    static int32 lhs, rhs, lhs1, lhs2, top, bottom, temp, flats, flatg, final, tile, no_edge_overlap;
+    flats = 0;
+    final = 0;
+    tile = 0;
+    no_edge_overlap = 0;
+    static int32 v, i, x, x1, x2, y, y1, y2, z, h, ti, lhsi, rhsi, d;
+    static int32 g1x, g2x, g1tx, g2tx, g1ty, g2ty, g1xi, g2xi, g1txi, g2txi, g1tyi, g2tyi, tx, ty, txi, tyi, roff, loff;
+    static int64 i64;
+    static img_struct *src, *dst;
+    static uint8 *pixel_offset;
+    static uint32 *pixel_offset32;
+    static uint8 *dst_offset;
+    static uint32 *dst_offset32;
+    static uint8 *src_offset;
+    static uint32 *src_offset32;
+    static uint32 col, destcol, transparent_color;
+    static uint8 *cp;
+
+    // hardware support
+    // is source a hardware handle?
+    if (si) {
+
+        static int32 src, dst; // scope is a wonderful thing
+        src = si;
+        dst = di;
+        hardware_img_struct *src_himg = (hardware_img_struct *)list_get(hardware_img_handles, src - HARDWARE_IMG_HANDLE_OFFSET);
+        if (src_himg != NULL) { // source is hardware image
+            src -= HARDWARE_IMG_HANDLE_OFFSET;
+
+            flush_old_hardware_commands();
+
+            // check dst
+            hardware_img_struct *dst_himg = NULL;
+            if (dst < 0) {
+                dst_himg = (hardware_img_struct *)list_get(hardware_img_handles, dst - HARDWARE_IMG_HANDLE_OFFSET);
+                if (dst_himg == NULL) {
+                    error(258);
+                    return;
+                }
+                dst -= HARDWARE_IMG_HANDLE_OFFSET;
+            } else {
+                if (dst > 1) {
+                    error(5);
+                    return;
+                }
+                dst = -dst;
+            }
+
+            static int32 use3d;
+            use3d = 0;
+            if (passed & (4 + 8 + 16))
+                use3d = 1;
+
+            if ((passed & 1) == 1 && use3d == 0) {
+                error(5);
+                return;
+            } // seamless not supported for 2D hardware version yet
+
+            // create new command handle & structure
+            int32 hgch = list_add(hardware_graphics_command_handles);
+            hardware_graphics_command_struct *hgc = (hardware_graphics_command_struct *)list_get(hardware_graphics_command_handles, hgch);
+
+            hgc->remove = 0;
+
+            // set command values
+            if (use3d) {
+                hgc->command = HARDWARE_GRAPHICS_COMMAND__MAPTRIANGLE3D;
+                hgc->cull_mode = CULL_MODE__NONE;
+                if (cull_options == 1)
+                    hgc->cull_mode = CULL_MODE__CLOCKWISE_ONLY;
+                if (cull_options == 2)
+                    hgc->cull_mode = CULL_MODE__ANTICLOCKWISE_ONLY;
+            } else {
+                hgc->command = HARDWARE_GRAPHICS_COMMAND__MAPTRIANGLE;
+            }
+
+            hgc->src_img = src;
+            hgc->src_x1 = sx1;
+            hgc->src_y1 = sy1;
+            hgc->src_x2 = sx2;
+            hgc->src_y2 = sy2;
+            hgc->src_x3 = sx3;
+            hgc->src_y3 = sy3;
+
+            hgc->dst_img = dst;
+            hgc->dst_x1 = fdx1;
+            hgc->dst_y1 = fdy1;
+            hgc->dst_x2 = fdx2;
+            hgc->dst_y2 = fdy2;
+            hgc->dst_x3 = fdx3;
+            hgc->dst_y3 = fdy3;
+            if (use3d) {
+                hgc->dst_z1 = fdz1;
+                hgc->dst_z2 = fdz2;
+                hgc->dst_z3 = fdz3;
+                if (dst == 0)
+                    hgc->depthbuffer_mode = depthbuffer_mode0;
+                if (dst == -1)
+                    hgc->depthbuffer_mode = depthbuffer_mode1;
+                if (dst_himg != NULL) {
+                    hgc->depthbuffer_mode = dst_himg->depthbuffer_mode;
+                }
+            }
+
+            hgc->smooth = smooth_options;
+
+            hgc->use_alpha = 1;
+            if (src_himg->alpha_disabled)
+                hgc->use_alpha = 0;
+            // only consider dest alpha setting if it is a hardware image
+            if (dst_himg != NULL) {
+                if (dst_himg->alpha_disabled)
+                    hgc->use_alpha = 0;
+            }
+
+            // queue the command
+            hgc->next_command = 0;
+            hgc->order = display_frame_order_next;
+
+            if (last_hardware_command_added) {
+                hardware_graphics_command_struct *hgc2 =
+                    (hardware_graphics_command_struct *)list_get(hardware_graphics_command_handles, last_hardware_command_added);
+                hgc2->next_command = hgch;
+            }
+            last_hardware_command_added = hgch;
+            if (first_hardware_command == 0)
+                first_hardware_command = hgch;
+
+            return;
+        }
+    }
+
+    if (passed & (4 + 8 + 16)) {
+        error(5);
+        return;
+    } // 3D not supported using software surfaces
+
+    // recreate old calling convention
+    static int32 passed_original;
+    passed_original = passed;
+    passed = 0;
+    if (passed_original & 1)
+        passed += 1;
+    if (passed_original & 2)
+        passed += 2;
+    if (passed_original & 32)
+        passed += 4;
+    if (passed_original & 64)
+        passed += 8;
+
+    static int32 dx1, dy1, dx2, dy2, dx3, dy3;
+    dx1 = qbr_float_to_long(fdx1);
+    dy1 = qbr_float_to_long(fdy1);
+    dx2 = qbr_float_to_long(fdx2);
+    dy2 = qbr_float_to_long(fdy2);
+    dx3 = qbr_float_to_long(fdx3);
+    dy3 = qbr_float_to_long(fdy3);
+
+    // get/validate src/dst images
+    if (passed & 2) {
+        if (si >= 0) { // validate si
+            validatepage(si);
+            si = page[si];
+        } else {
+            si = -si;
+            if (si >= nextimg) {
+                error(258);
+                return;
+            }
+            if (!img[si].valid) {
+                error(258);
+                return;
+            }
+        }
+        src = &img[si];
+    } else {
+        src = read_page;
+    }
+    if (passed & 4) {
+        if (di >= 0) { // validate di
+            validatepage(di);
+            di = page[di];
+        } else {
+            di = -di;
+            if (di >= nextimg) {
+                error(258);
+                return;
+            }
+            if (!img[di].valid) {
+                error(258);
+                return;
+            }
+        }
+        dst = &img[di];
+    } else {
+        dst = write_page;
+    }
+    if (src->text || dst->text) {
+        error(5);
+        return;
+    }
+    if (src->bytes_per_pixel != dst->bytes_per_pixel) {
+        error(5);
+        return;
+    }
+
+    if (passed & 1)
+        no_edge_overlap = 1;
+
+    dwidth = dst->width;
+    dheight = dst->height;
+    swidth = src->width;
+    sheight = src->height;
+    swidth2 = swidth << 16;
+    sheight2 = sheight << 16;
+
+    struct PointType {
+        int32 x;
+        int32 y;
+        int32 tx;
+        int32 ty;
+    };
+    static PointType p[4], *p1, *p2, *tp, *tempp;
+    struct GradientType {
+        int32 x;
+        int32 xi;
+        int32 tx;
+        int32 ty;
+        int32 txi;
+        int32 tyi;
+        int32 y1;
+        int32 y2;
+        //----
+        PointType *p1;
+        PointType *p2; // needed for clipping above screen
+    };
+    static GradientType g[4], *tg, *g1, *g2, *g3, *tempg;
+    memset(&g, 0, sizeof(GradientType) * 4);
+
+    /*
+        'Reference:
+        'Fixed point division: a/b -> a*65536/b (using intermediate _INTEGER64)
+    */
+
+    /* debugging method
+        ofstream f;
+        char fn[] = "c:\\qb64\\20c.txt";
+        f.open(fn, ios::app);
+        f<<"\n";
+        f<<variablename;
+        f<<"\n";
+        f.close();
+    */
+
+    static int32 limit, limit2, nlimit, nlimit2;
+
+    //----------------------------------------------------------------------------------------------------------------------------------------------------
+
+    limit = 16383;
+    limit2 = (limit << 16) + 32678;
+    nlimit = -limit;
+    nlimit2 = -limit2;
+
+    // convert texture coords to fixed-point & adjust so 0,0 effectively becomes 0.5,0.5 (ie. 32768,32768)
+    v = ((int32)(sx1 * 65536.0)) + 32768;
+    if (v < 16 | v >= swidth2 - 16)
+        tile = 1;
+    if (v<nlimit2 | v> limit2) {
+        error(5);
+        return;
+    }
+    p[1].tx = v;
+    v = ((int32)(sx2 * 65536.0)) + 32768;
+    if (v < 16 | v >= swidth2 - 16)
+        tile = 1;
+    if (v<nlimit2 | v> limit2) {
+        error(5);
+        return;
+    }
+    p[2].tx = v;
+    v = ((int32)(sx3 * 65536.0)) + 32768;
+    if (v < 16 | v >= swidth2 - 16)
+        tile = 1;
+    if (v<nlimit2 | v> limit2) {
+        error(5);
+        return;
+    }
+    p[3].tx = v;
+    v = ((int32)(sy1 * 65536.0)) + 32768;
+    if (v < 16 | v >= sheight2 - 16)
+        tile = 1;
+    if (v<nlimit2 | v> limit2) {
+        error(5);
+        return;
+    }
+    p[1].ty = v;
+    v = ((int32)(sy2 * 65536.0)) + 32768;
+    if (v < 16 | v >= sheight2 - 16)
+        tile = 1;
+    if (v<nlimit2 | v> limit2) {
+        error(5);
+        return;
+    }
+    p[2].ty = v;
+    v = ((int32)(sy3 * 65536.0)) + 32768;
+    if (v < 0 | v >= sheight2 - 16)
+        tile = 1;
+    if (v<nlimit2 | v> limit2) {
+        error(5);
+        return;
+    }
+    p[3].ty = v;
+
+    if (tile) {
+        // shifting to positive range is required for tiling | mod on negative coords will fail
+        // shifting may also alleviate the need for tiling if(shifted coords fall within textures normal range
+        // does texture extend beyond surface dimensions?
+        lhs = 2147483647;
+        rhs = -2147483648;
+        top = 2147483647;
+        bottom = -2147483648;
+        for (i = 1; i <= 3; i++) {
+            tp = &p[i];
+            y = tp->ty;
+            if (y > bottom)
+                bottom = y;
+            if (y < top)
+                top = y;
+            x = tp->tx;
+            if (x > rhs)
+                rhs = x;
+            if (x < lhs)
+                lhs = x;
+        }
+        z = 0;
+        if (lhs < 0) {
+            // shift texture coords right
+            v = ((lhs + 1) / -swidth2 + 1) * swidth2; // offset to move by
+            for (i = 1; i <= 3; i++) {
+                tp = &p[i];
+                tp->tx = tp->tx + v;
+                z = 1;
+            }
+        } else {
+            if (lhs >= swidth2) {
+                // shift texture coords left
+                z = 1;
+                v = (lhs / swidth2) * swidth2; // offset to move by
+                for (i = 1; i <= 3; i++) {
+                    tp = &p[i];
+                    tp->tx = tp->tx - v;
+                    z = 1;
+                }
+            }
+        }
+        if (top < 0) {
+            // shift texture coords down
+            v = ((top + 1) / -sheight2 + 1) * sheight2; // offset to move by
+            for (i = 1; i <= 3; i++) {
+                tp = &p[i];
+                tp->ty = tp->ty + v;
+                z = 1;
+            }
+        } else {
+            if (top >= swidth2) {
+                // shift texture coords up
+                v = (top / sheight2) * sheight2; // offset to move by
+                for (i = 1; i <= 3; i++) {
+                    tp = &p[i];
+                    tp->ty = tp->ty - v;
+                    z = 1;
+                }
+                z = 1;
+            }
+        }
+        if (z) {
+            // reassess need for tiling
+            z = 0;
+            for (i = 1; i <= 3; i++) {
+                tp = &p[i];
+                v = tp->tx;
+                if (v < 16 | v >= swidth2 - 16) {
+                    z = 1;
+                    break;
                 }
                 goto shell_complete;//failed
                 
