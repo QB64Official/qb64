@@ -55,8 +55,12 @@ rem )
 reg Query "HKLM\Hardware\Description\System\CentralProcessor\0" | find /i "x86" > NUL && goto chose32 || goto choose
 
 :choose
-choice /c 12 /M "Use (1) 64-bit or (2) 32-bit MINGW? "
-if errorlevel == 1 goto chose64
+if not exist %SystemRoot%\system32\choice.exe (
+    set /p errorlevel="Install (1) 64-bit or (2) 32-bit MINGW? "
+) else (
+    choice /c 12 /M "Install (1) 64-bit or (2) 32-bit MINGW? "
+)
+if errorlevel 1 goto chose64
 goto chose32
 
 :chose32
@@ -74,18 +78,34 @@ goto chosen
 echo Downloading %url%...
 curl -L %url% -o temp.7z
 
-echo Downloading 7zr.exe...
-curl -L https://www.7-zip.org/a/7zr.exe -o 7zr.exe
+echo Testing for 7zip
+7z >NUL 2>&1
 
-echo Extracting C++ Compiler...
-7zr.exe x temp.7z -y
+if ERRORLEVEL 9009 (
+
+    echo Downloading 7zr.exe...
+	rem Check for XP (either 32-bit or 64-bit)
+	ver | findstr /R /C:"Version 5.[12]"
+	if errorlevel 0 (
+        curl -Lk https://www.7-zip.org/a/7zr.exe -o 7zr.exe
+    ) else (
+        curl -L https://www.7-zip.org/a/7zr.exe -o 7zr.exe
+	)
+
+    echo Extracting C++ Compiler...
+    7zr.exe x temp.7z -y
+) else (
+    echo Extracting C++ Compiler...
+    7z x temp.7z -y
+)
 
 echo Moving C++ compiler...
 for /f %%a in ('dir %MINGW% /b') do move /y "%MINGW%\%%a" internal\c\c_compiler\
 
 echo Cleaning up..
 rd %MINGW%
-del 7zr.exe
+if exist 7zr.exe del 7zr.exe
+
 del temp.7z
 
 :skipccompsetup

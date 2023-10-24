@@ -15,14 +15,18 @@ rem Check if curl exists
 curl --version 2>NUL 1>&2
 
 
-if %ERRORLEVEL == 9009 (
+if %ERRORLEVEL% == 9009 (
+rem check if we have it already
+    if exist internal\curl\curl.exe goto gotcurl
     mkdir internal\curl >NUL
     echo Fetching %LINK%
     explorer %LINK%
-
     rem we should wait until the file is downloaded, because explorer returns straight away
+:keeptesting
+    rem sleep 5 - we need to find something that'll work on XP, as timeout doesn't exist
+    rem if not exist "%USERPROFILE%\Desktop\%CURLVERSION%" goto keeptesting
     "%SystemRoot%\system32\expand.exe" "%USERPROFILE%\Desktop\%CURLVERSION%" /F:%ARCH%\* internal\curl
-
+:gotcurl
     rem Add to path
     PATH=%PATH%;%~dp0\internal\curl
 ) ELSE (
